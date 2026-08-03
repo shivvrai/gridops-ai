@@ -158,8 +158,7 @@ class Ticket(Base):
     affected_poles = relationship("TicketAffectedPole", back_populates="ticket")
 
     __table_args__ = (
-        Index("idx_tickets_status", "status",
-              postgresql_where=(Column("status").notin_(["verified", "closed"]))),
+        Index("idx_tickets_status", "status"),
     )
 
 

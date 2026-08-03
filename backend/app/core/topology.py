@@ -12,8 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 import networkx as nx
-import numpy as np
-from scipy.spatial import KDTree
+
 
 logger = logging.getLogger(__name__)
 
@@ -87,20 +86,21 @@ def infer_topology_for_dt(
     if not poles:
         return []
 
-    # Compute adaptive distance threshold: mean nearest-neighbour distance + 3σ
-    coords = np.array([[p.lat * METERS_PER_DEG_LAT, p.lon * METERS_PER_DEG_LON] for p in poles])
-    dt_coord = np.array([dt.lat * METERS_PER_DEG_LAT, dt.lon * METERS_PER_DEG_LON])
+    # Pure Python pairwise distances
+    nn_dists = []
+    for i in range(len(poles)):
+        min_d = float('inf')
+        lat1, lon1 = poles[i].lat * METERS_PER_DEG_LAT, poles[i].lon * METERS_PER_DEG_LON
+        for j in range(len(poles)):
+            if i == j: continue
+            lat2, lon2 = poles[j].lat * METERS_PER_DEG_LAT, poles[j].lon * METERS_PER_DEG_LON
+            d = math.sqrt((lat1-lat2)**2 + (lon1-lon2)**2)
+            if d < min_d: min_d = d
+        nn_dists.append(min_d)
 
-    if len(poles) == 1:
-        return [(dt.dt_id, poles[0].pole_id, "MEDIUM")]
-
-    # KD-tree for nearest-neighbour lookups
-    tree = KDTree(coords)
-    nn_dists, _ = tree.query(coords, k=2)  # k=2 because nearest to self is 0
-    nn_dists = nn_dists[:, 1]  # second column = nearest non-self neighbour
-
-    mean_dist = float(np.mean(nn_dists))
-    std_dist = float(np.std(nn_dists))
+    mean_dist = sum(nn_dists) / len(nn_dists)
+    variance = sum((d - mean_dist)**2 for d in nn_dists) / len(nn_dists)
+    std_dist = math.sqrt(variance)
     threshold = mean_dist + 3 * std_dist
     threshold = max(threshold, 80.0)  # floor at 80m to avoid overly tight thresholds for dense areas
 
@@ -112,15 +112,16 @@ def infer_topology_for_dt(
     pole_ids = [p.pole_id for p in poles]
 
     # Start from DT: find nearest pole to DT
-    dt_dists = np.sqrt(np.sum((coords - dt_coord) ** 2, axis=1))
-    first_idx = int(np.argmin(dt_dists))
+    dt_lat, dt_lon = dt.lat * METERS_PER_DEG_LAT, dt.lon * METERS_PER_DEG_LON
+    dt_dists = [math.sqrt((p.lat*METERS_PER_DEG_LAT - dt_lat)**2 + (p.lon*METERS_PER_DEG_LON - dt_lon)**2) for p in poles]
+    first_idx = min(range(len(poles)), key=lambda i: dt_dists[i])
 
     assigned = set()
     edges = []
 
     # Assign first pole to DT
     first_pole = poles[first_idx]
-    first_dist = float(dt_dists[first_idx])
+    first_dist = dt_dists[first_idx]
     edges.append((dt.dt_id, first_pole.pole_id,
                   "HIGH" if first_dist < mean_dist else "MEDIUM"))
     assigned.add(first_idx)
@@ -136,12 +137,14 @@ def infer_topology_for_dt(
 
         for f_idx in list(frontier):
             # Find nearest unassigned poles to this frontier node
-            dists_from_f = np.sqrt(np.sum((coords - coords[f_idx]) ** 2, axis=1))
+            f_lat, f_lon = poles[f_idx].lat * METERS_PER_DEG_LAT, poles[f_idx].lon * METERS_PER_DEG_LON
+            dists_from_f = [math.sqrt((p.lat*METERS_PER_DEG_LAT - f_lat)**2 + (p.lon*METERS_PER_DEG_LON - f_lon)**2) for p in poles]
 
-            for candidate_idx in np.argsort(dists_from_f):
+            candidate_indices = sorted(range(len(poles)), key=lambda i: dists_from_f[i])
+            for candidate_idx in candidate_indices:
                 if candidate_idx in assigned:
                     continue
-                dist = float(dists_from_f[candidate_idx])
+                dist = dists_from_f[candidate_idx]
                 if dist > threshold:
                     break  # sorted, so all remaining are farther
                 if dist < best_dist:
@@ -174,8 +177,10 @@ def infer_topology_for_dt(
             # Force-attach them to nearest assigned pole with LOW confidence
             for idx in range(len(poles)):
                 if idx not in assigned:
-                    dists_all = np.sqrt(np.sum((coords - coords[idx]) ** 2, axis=1))
-                    for near_idx in np.argsort(dists_all):
+                    idx_lat, idx_lon = poles[idx].lat * METERS_PER_DEG_LAT, poles[idx].lon * METERS_PER_DEG_LON
+                    dists_all = [math.sqrt((p.lat*METERS_PER_DEG_LAT - idx_lat)**2 + (p.lon*METERS_PER_DEG_LON - idx_lon)**2) for p in poles]
+                    near_indices = sorted(range(len(poles)), key=lambda i: dists_all[i])
+                    for near_idx in near_indices:
                         if near_idx in assigned:
                             edges.append((poles[near_idx].pole_id, poles[idx].pole_id, "LOW"))
                             assigned.add(idx)

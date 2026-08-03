@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # Database
-    database_url: str = "postgresql+asyncpg://faultloc:faultloc@db:5432/faultloc"
-    database_url_sync: str = "postgresql://faultloc:faultloc@db:5432/faultloc"
+    database_url: str = "sqlite+aiosqlite:///./faultloc.db"
+    database_url_sync: str = "sqlite:///./faultloc.db"
 
     # Server
     app_host: str = "0.0.0.0"

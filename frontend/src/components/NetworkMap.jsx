@@ -15,6 +15,20 @@ const TOPO_COLORS = {
   unknown: 'rgba(107, 114, 128, 0.2)',
 }
 
+/** Forces Leaflet to recalculate container size after the map becomes visible */
+function MapReadyHandler() {
+  const map = useMap()
+  useEffect(() => {
+    // Immediate invalidation
+    map.invalidateSize()
+    // Delayed invalidation — covers CSS transitions / layout shifts
+    const t1 = setTimeout(() => map.invalidateSize(), 100)
+    const t2 = setTimeout(() => map.invalidateSize(), 400)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [map])
+  return null
+}
+
 function FitBounds({ poles }) {
   const map = useMap()
   useEffect(() => {
@@ -42,12 +56,13 @@ function NetworkMap({ poles, dts, edges, tickets, selectedTicket, onPoleClick })
   const affectedPoles = new Set(selectedTicket?.affected_poles || [])
 
   return (
-    <MapContainer center={center} zoom={15} style={{ height: '100%', width: '100%' }}>
+    <MapContainer center={center} zoom={15} preferCanvas={true} style={{ height: '100%', width: '100%' }}>
       <TileLayer
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
       />
       <FitBounds poles={poles} />
+      <MapReadyHandler />
 
       {/* Network edges (pole-to-pole spans) */}
       {edges.map((edge, i) => (

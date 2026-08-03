@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import NetworkMap from './components/NetworkMap'
+import NetworkCanvas from './components/NetworkCanvas'
 import TicketList from './components/TicketList'
 import TicketDetail from './components/TicketDetail'
 import SimulatorPanel from './components/SimulatorPanel'
@@ -18,6 +19,7 @@ function App() {
   const [networkInfo, setNetworkInfo] = useState(null)
   const [activeTab, setActiveTab] = useState('tickets')
   const [toasts, setToasts] = useState([])
+  const [viewMode, setViewMode] = useState('canvas')
   const [connected, setConnected] = useState(false)
   const eventSourceRef = useRef(null)
 
@@ -167,6 +169,20 @@ function App() {
           Fault Localization System
         </h1>
         <div className="header-status">
+          <div className="view-toggle">
+            <button
+              className={viewMode === 'canvas' ? 'active' : ''}
+              onClick={() => setViewMode('canvas')}
+            >
+              🎨 Canvas
+            </button>
+            <button
+              className={viewMode === 'map' ? 'active' : ''}
+              onClick={() => setViewMode('map')}
+            >
+              🗺️ Map
+            </button>
+          </div>
           <span>
             <span className={`status-dot ${connected ? 'live' : 'error'}`} />
             {connected ? 'Live' : 'Reconnecting...'}
@@ -217,14 +233,25 @@ function App() {
       </div>
 
       <div className="map-container">
-        <NetworkMap
-          poles={poles}
-          dts={dts}
-          edges={edges}
-          tickets={activeTickets}
-          selectedTicket={selectedTicket}
-          onPoleClick={(p) => console.log('Pole clicked:', p)}
-        />
+        {viewMode === 'map' ? (
+          <NetworkMap
+            key="map-view"
+            poles={poles}
+            dts={dts}
+            edges={edges}
+            tickets={activeTickets}
+            selectedTicket={selectedTicket}
+            onPoleClick={(p) => console.log('Pole clicked:', p)}
+          />
+        ) : (
+          <NetworkCanvas
+            poles={poles}
+            dts={dts}
+            edges={edges}
+            tickets={activeTickets}
+            selectedTicket={selectedTicket}
+          />
+        )}
 
         {selectedTicket && (
           <TicketDetail

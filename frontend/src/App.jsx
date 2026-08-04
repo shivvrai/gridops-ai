@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import NetworkMap from './components/NetworkMap'
 import NetworkCanvas from './components/NetworkCanvas'
 import TicketList from './components/TicketList'
 import TicketDetail from './components/TicketDetail'
@@ -19,7 +18,7 @@ function App() {
   const [networkInfo, setNetworkInfo] = useState(null)
   const [activeTab, setActiveTab] = useState('tickets')
   const [toasts, setToasts] = useState([])
-  const [viewMode, setViewMode] = useState('canvas')
+
   const [connected, setConnected] = useState(false)
   const eventSourceRef = useRef(null)
 
@@ -157,9 +156,65 @@ function App() {
     }
     return null
   }
-
   const activeTickets = tickets.filter(t => !['verified', 'closed'].includes(t.status))
   const recentTickets = tickets.filter(t => ['verified', 'closed'].includes(t.status)).slice(0, 10)
+
+  const handleInjectFault = async (type, targetId, parentId) => {
+    try {
+      if (type === 'span') {
+        const poleId = targetId.startsWith('bp-') ? targetId.slice(3) : targetId;
+        await fetch(`${API_URL}/api/simulator/fault/span`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dt_id: parentId, fault_after_pole: poleId })
+        });
+      } else if (type === 'dt') {
+        const dtId = targetId.startsWith('bdt-') ? targetId.slice(4) : targetId;
+        await fetch(`${API_URL}/api/simulator/fault/dt`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dt_id: dtId })
+        });
+      }
+      setTimeout(fetchData, 1000);
+    } catch (err) {
+      addToast('Error', err.message, 'fault')
+    }
+  };
+
+  const handleRepairSinglePole = async (poleId) => {
+    try {
+      const cleanPoleId = poleId.startsWith('bp-') ? poleId.slice(3) : poleId;
+      await fetch(`${API_URL}/api/simulator/repair/pole`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pole_id: cleanPoleId })
+      });
+      setTimeout(fetchData, 1000);
+    } catch (err) {
+      addToast('Error', err.message, 'fault')
+    }
+  };
+
+  const handleRepairAllAPI = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/simulator/active-faults`);
+      if (res.ok) {
+        const faults = await res.json();
+        const dtIds = [...new Set(faults.map(f => f.dt_id).filter(Boolean))];
+        for (const dtId of dtIds) {
+          await fetch(`${API_URL}/api/simulator/repair`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dt_id: dtId })
+          });
+        }
+        setTimeout(fetchData, 1000);
+      }
+    } catch (err) {
+      addToast('Error', err.message, 'fault')
+    }
+  };
 
   return (
     <div className="app-layout">
@@ -169,20 +224,6 @@ function App() {
           Fault Localization System
         </h1>
         <div className="header-status">
-          <div className="view-toggle">
-            <button
-              className={viewMode === 'canvas' ? 'active' : ''}
-              onClick={() => setViewMode('canvas')}
-            >
-              🎨 Canvas
-            </button>
-            <button
-              className={viewMode === 'map' ? 'active' : ''}
-              onClick={() => setViewMode('map')}
-            >
-              🗺️ Map
-            </button>
-          </div>
           <span>
             <span className={`status-dot ${connected ? 'live' : 'error'}`} />
             {connected ? 'Live' : 'Reconnecting...'}
@@ -233,25 +274,16 @@ function App() {
       </div>
 
       <div className="map-container">
-        {viewMode === 'map' ? (
-          <NetworkMap
-            key="map-view"
-            poles={poles}
-            dts={dts}
-            edges={edges}
-            tickets={activeTickets}
-            selectedTicket={selectedTicket}
-            onPoleClick={(p) => console.log('Pole clicked:', p)}
-          />
-        ) : (
-          <NetworkCanvas
-            poles={poles}
-            dts={dts}
-            edges={edges}
-            tickets={activeTickets}
-            selectedTicket={selectedTicket}
-          />
-        )}
+        <NetworkCanvas
+          poles={poles}
+          dts={dts}
+          edges={edges}
+          tickets={activeTickets}
+          selectedTicket={selectedTicket}
+          onInjectFault={handleInjectFault}
+          onRepairSingle={handleRepairSinglePole}
+          onRepairAll={handleRepairAllAPI}
+        />
 
         {selectedTicket && (
           <TicketDetail

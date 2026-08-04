@@ -37,6 +37,10 @@ class RepairRequest(BaseModel):
     affected_poles: Optional[list[str]] = None
 
 
+class SinglePoleRepairRequest(BaseModel):
+    pole_id: str
+
+
 @router.post("/fault/span")
 async def inject_span_fault(
     request: SpanFaultRequest,
@@ -239,6 +243,91 @@ async def repair_fault(
         "events_processed": processed,
         "note": "Tickets should auto-verify on next sweep if all poles are live."
     }
+
+@router.post("/repair/pole")
+async def repair_single_pole(
+    request: SinglePoleRepairRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Repair a single pole — sends a power-restore event just for that pole."""
+    from app.main import app_state
+    from datetime import datetime, timezone
+
+    simulator = app_state["simulator"]
+    engine = app_state["engine"]
+
+    G = engine.network_graph
+    if request.pole_id not in G.nodes:
+        return {"status": "error", "note": f"Pole {request.pole_id} not found"}
+
+    pole_data = G.nodes[request.pole_id]
+    device_id = pole_data.get("device_id")
+    if not device_id:
+        return {"status": "error", "note": f"Pole {request.pole_id} has no device"}
+
+    # Simulate a power-restored heartbeat for just this pole
+    event = simulator._make_event(
+        pole_id=request.pole_id,
+        device_id=device_id,
+        event="heartbeat",
+        energized=True,
+        fw=pole_data.get("fw_version", "1.4.2"),
+    )
+    events = [event]
+
+    processed = 0
+    for evt in events:
+        try:
+            ts = datetime.fromisoformat(evt["ts"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            ts = datetime.now(timezone.utc)
+        ok = engine.process_event(
+            pole_id=evt["pole_id"],
+            device_id=evt["device_id"],
+            event=evt["event"],
+            energized=evt["energized"],
+            ts=ts,
+            seq=evt["seq"],
+            fw=evt.get("fw"),
+        )
+        if ok:
+            processed += 1
+
+    return {
+        "status": "repaired",
+        "pole_id": request.pole_id,
+        "events_processed": processed,
+        "note": "Ticket will auto-verify on next sweep if all faulted poles are live.",
+    }
+
+
+@router.get("/active-faults")
+async def get_active_faults():
+    """List all poles currently in a dark/suspected state for manual repair UI."""
+    from app.main import app_state
+
+    engine = app_state["engine"]
+    if not engine.pole_states:
+        return []
+
+    G = engine.network_graph
+    dark_poles = []
+    for pole_id, state in engine.pole_states.items():
+        if state.status in ("confirmed_dark", "suspected_dark"):
+            data = G.nodes.get(pole_id, {})
+            dark_poles.append({
+                "pole_id": pole_id,
+                "status": state.status,
+                "dt_id": data.get("dt_id"),
+                "feeder_id": data.get("feeder_id"),
+                "has_device": data.get("device_id") is not None,
+            })
+
+    # Sort: confirmed_dark first, then by dt_id
+    dark_poles.sort(key=lambda p: (0 if p["status"] == "confirmed_dark" else 1, p["dt_id"] or ""))
+    return dark_poles
+
+
 
 
 @router.get("/network/info")

@@ -91,10 +91,10 @@ class GeneratedNetwork:
 
 
 def generate_network(
-    num_substations: int = 4,
-    feeders_per_sub: tuple[int, int] = (6, 10),
-    dts_per_feeder: tuple[int, int] = (8, 18),
-    poles_per_dt: tuple[int, int] = (15, 90),
+    num_substations: int = 1,
+    feeders_per_sub: tuple[int, int] = (1, 2),
+    dts_per_feeder: tuple[int, int] = (2, 4),
+    poles_per_dt: tuple[int, int] = (15, 30),
     missing_topo_ratio: float = 0.60,
     no_device_ratio: float = 0.09,
     no_pincode_ratio: float = 0.03,

@@ -494,7 +494,7 @@ function solveFault(nodes, edges) {
    COMPONENT
    ================================================================ */
 
-export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, selectedTicket }) {
+export default function NetworkCanvas({ poles, dts, edges: initialEdges, tickets, selectedTicket, onInjectFault, onRepairSingle, onRepairAll }) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const animRef = useRef(null)
@@ -557,10 +557,10 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
 
     const nn = []
     dts.forEach(dt => nn.push({ id: `bdt-${dt.dt_id}`, type: 'dt', x: tX(dt.lon), y: tY(dt.lat), label: dt.dt_id, status: 'live', meta: dt }))
-    poles.forEach(p => nn.push({ id: `bp-${p.pole_id}`, type: 'pole', x: tX(p.lon), y: tY(p.lat), label: p.pole_id, status: p.status || 'live', meta: p }))
+    poles.forEach(p => nn.push({ id: `bp-${p.pole_id}`, type: 'pole', x: tX(p.lon), y: tY(p.lat), label: p.pole_id, status: p.status || 'live', meta: p, isFault: p.status === 'fault' }))
 
     const ne = []
-    beEdges.forEach((e, i) => {
+    initialEdges.forEach((e, i) => {
       const fx = tX(e.from_lon), fy = tY(e.from_lat), tx = tX(e.to_lon), ty = tY(e.to_lat)
       let fromN = null, toN = null, fd = Infinity, td = Infinity
       nn.forEach(n => {
@@ -569,20 +569,24 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
         if (d2 < td) { td = d2; toN = n }
       })
       if (fromN && toN && fromN.id !== toN.id) {
-        ne.push({ id: `be-${i}`, from: fromN.id, to: toN.id, type: autoEdgeType(fromN, toN), status: 'live' })
+        ne.push({ id: `be-${i}`, from: fromN.id, to: toN.id, type: autoEdgeType(fromN, toN), status: e.status || 'live' })
       }
     })
 
     setNodes(nn); setEdges(ne)
     setCounters({ pole: poles.length, dt: dts.length, home: 0 })
-  }, [poles, dts, beEdges])
+    const fIds = new Set()
+    ne.forEach(e => { if (e.status === 'fault') fIds.add(e.id) })
+    nn.forEach(n => { if (n.isFault) fIds.add(n.id) })
+    setFaultIds(fIds)
+  }, [poles, dts, initialEdges])
 
   /* ---- Sync pole statuses from backend ---- */
   useEffect(() => {
     if (!poles.length) return
     const m = {}
-    poles.forEach(p => { m[`bp-${p.pole_id}`] = p.status || 'live' })
-    setNodes(prev => prev.map(n => m[n.id] !== undefined ? { ...n, status: m[n.id] } : n))
+    poles.forEach(p => { m[`bp-${p.pole_id}`] = { status: p.status || 'live', isFault: p.status === 'fault' } })
+    setNodes(prev => prev.map(n => m[n.id] !== undefined ? { ...n, status: m[n.id].status, isFault: m[n.id].isFault } : n))
   }, [poles])
 
   /* ---- Animation loop ---- */
@@ -727,36 +731,38 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
         // Click an edge to toggle fault status
         if (ce) {
           if (ce.status === 'fault') {
-            // Un-fault this edge (repair single)
             const repaired = s.edges.map(ed => ed.id === ce.id ? { ...ed, status: 'live' } : ed)
             const newNodes = rederiveStatuses(s.nodes, repaired)
             setEdges(repaired)
             setNodes(newNodes)
             setFaultIds(prev => { const next = new Set(prev); next.delete(ce.id); return next })
-            setBoundaries([])
+            if (onRepairSingle) onRepairSingle(ce.from);
           } else {
-            // Add fault on this edge
             const faulted = s.edges.map(ed => ed.id === ce.id ? { ...ed, status: 'fault' } : ed)
             const newNodes = rederiveStatuses(s.nodes, faulted)
             setEdges(faulted)
             setNodes(newNodes)
             setFaultIds(prev => new Set(prev).add(ce.id))
-            setBoundaries([])
+            const fromNode = s.nodes.find(n => n.id === ce.from);
+            if (fromNode && onInjectFault) {
+              onInjectFault('span', ce.from, fromNode.meta?.dt_id || null);
+            }
           }
         } else if (cn && cn.type !== 'substation') {
-          // Click a pole, DT, or home to toggle equipment failure fault
           if (cn.isFault) {
             const repairedNodes = s.nodes.map(nd => nd.id === cn.id ? { ...nd, isFault: false } : nd)
             const newNodes = rederiveStatuses(repairedNodes, s.edges)
             setNodes(newNodes)
             setFaultIds(prev => { const next = new Set(prev); next.delete(cn.id); return next })
-            setBoundaries([])
+            if (onRepairSingle) onRepairSingle(cn.id);
           } else {
             const faultedNodes = s.nodes.map(nd => nd.id === cn.id ? { ...nd, isFault: true } : nd)
             const newNodes = rederiveStatuses(faultedNodes, s.edges)
             setNodes(newNodes)
             setFaultIds(prev => new Set(prev).add(cn.id))
-            setBoundaries([])
+            if (cn.type === 'dt' && onInjectFault) {
+               onInjectFault('dt', cn.id, null);
+            }
           }
         }
         break
@@ -774,7 +780,7 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
         }
         break
     }
-  }, [getWorld])
+  }, [getWorld, onInjectFault, onRepairSingle])
 
   /* ---- Mouse MOVE ---- */
   const onMove = useCallback((e) => {
@@ -853,20 +859,12 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
 
   /* ---- Action handlers ---- */
   const handleRandom = () => {
+    // Generate purely local fake random layout (will be overwritten by backend next tick)
     const r = containerRef.current?.getBoundingClientRect()
     const { nodes: nn, edges: ne } = genNetwork(r?.width || 1200, r?.height || 700)
     setNodes(nn); setEdges(ne); setBoundaries([]); setFaultIds(new Set()); setSelected(null); setSelectedSet(new Set())
     setTransform({ x: 0, y: 0, scale: 1 })
     setCounters({ pole: nn.filter(n => n.type === 'pole').length, dt: nn.filter(n => n.type === 'dt').length, home: nn.filter(n => n.type === 'home').length })
-  }
-
-  const handleFault = () => {
-    const { nodes: nn, edges: ne, faultId } = injectFault(nodes, edges)
-    if (faultId) {
-      setNodes(nn); setEdges(ne)
-      setFaultIds(prev => new Set(prev).add(faultId))
-      setBoundaries([])
-    }
   }
 
   const handleSolve = () => setBoundaries(solveFault(nodes, edges))
@@ -875,25 +873,10 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
     setNodes(p => p.map(n => ({ ...n, status: 'live', isFault: false })))
     setEdges(p => p.map(e => ({ ...e, status: 'live' })))
     setBoundaries([]); setFaultIds(new Set()); setSelectedSet(new Set())
+    if (onRepairAll) onRepairAll();
   }
 
-  const handleRepairSelected = () => {
-    const sel = S.current.selectedSet
-    // Repair faulted edges and faulted nodes in selection
-    const repairedEdges = edges.map(e => (sel.has(e.id) && e.status === 'fault') ? { ...e, status: 'live' } : e)
-    const repairedNodes = nodes.map(n => (sel.has(n.id) && n.isFault) ? { ...n, isFault: false } : n)
-    const newNodes = rederiveStatuses(repairedNodes, repairedEdges)
-    const remaining = new Set()
-    repairedEdges.forEach(e => { if (e.status === 'fault') remaining.add(e.id) })
-    newNodes.forEach(n => { if (n.isFault) remaining.add(n.id) })
-    setEdges(repairedEdges)
-    setNodes(newNodes)
-    setFaultIds(remaining)
-    setBoundaries([])
-    setSelectedSet(new Set())
-  }
-
-  const handleRepairSingle = (id) => {
+  const handleRepairSingleLocal = (id) => {
     const repairedEdges = edges.map(e => e.id === id ? { ...e, status: 'live' } : e)
     const repairedNodes = nodes.map(n => (n.id === id && n.isFault) ? { ...n, isFault: false } : n)
     const newNodes = rederiveStatuses(repairedNodes, repairedEdges)
@@ -906,6 +889,38 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
     setBoundaries([])
     if (selected?.id === id) setSelected(null)
     setSelectedSet(prev => { const next = new Set(prev); next.delete(id); return next })
+    
+    // Call backend
+    const edge = edges.find(e => e.id === id);
+    if (edge) {
+      if (onRepairSingle) onRepairSingle(edge.from);
+    } else {
+      if (onRepairSingle) onRepairSingle(id);
+    }
+  }
+
+  const handleRepairSelected = () => {
+    const sel = S.current.selectedSet
+    // Visual update
+    const repairedEdges = edges.map(e => (sel.has(e.id) && e.status === 'fault') ? { ...e, status: 'live' } : e)
+    const repairedNodes = nodes.map(n => (sel.has(n.id) && n.isFault) ? { ...n, isFault: false } : n)
+    const newNodes = rederiveStatuses(repairedNodes, repairedEdges)
+    const remaining = new Set()
+    repairedEdges.forEach(e => { if (e.status === 'fault') remaining.add(e.id) })
+    newNodes.forEach(n => { if (n.isFault) remaining.add(n.id) })
+    setEdges(repairedEdges)
+    setNodes(newNodes)
+    setFaultIds(remaining)
+    setBoundaries([])
+    setSelectedSet(new Set())
+
+    if (onRepairSingle) {
+      sel.forEach(id => {
+        const edge = edges.find(e => e.id === id);
+        if (edge) onRepairSingle(edge.from);
+        else onRepairSingle(id);
+      })
+    }
   }
 
   const handleClear = () => {
@@ -921,7 +936,6 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
   const homeCount = nodes.filter(n => n.type === 'home').length
   const faultCount = faultIds.size
   const hasAnyFault = faultCount > 0
-  const hasUnfaultedSpans = edges.some(e => e.type === 'span' && e.status !== 'fault')
   const selectedFaultCount = [...selectedSet].filter(id => faultIds.has(id)).length
 
   /* ---- RENDER ---- */
@@ -945,7 +959,6 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
         <div className="canvas-toolbar-sep" />
         <div className="canvas-actions">
           <button className="canvas-act-btn random" onClick={handleRandom}>🎲 Random</button>
-          <button className="canvas-act-btn fault" onClick={handleFault} disabled={nodes.length === 0 || !hasUnfaultedSpans}>⚡ Fault</button>
           <button className="canvas-act-btn solve" onClick={handleSolve} disabled={!hasAnyFault}>🔍 Solve</button>
           {selectedFaultCount > 0 && (
             <button className="canvas-act-btn repair-sel" onClick={handleRepairSelected}>
@@ -1001,9 +1014,9 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
           {selected.meta?.dt_id && <div className="info-row"><span>DT</span><span className="info-val">{selected.meta.dt_id}</span></div>}
           {selected.meta?.feeder_id && <div className="info-row"><span>Feeder</span><span className="info-val">{selected.meta.feeder_id}</span></div>}
           {selected.meta?.pincode && <div className="info-row"><span>PIN</span><span className="info-val">{selected.meta.pincode}</span></div>}
-          {faultIds.has(selected.id) && (
-            <button className="canvas-act-btn repair single-repair-btn" onClick={() => handleRepairSingle(selected.id)}>
-              🔧 Repair Pole Fault
+          {selected.isFault && (
+            <button className="canvas-act-btn repair single-repair-btn" onClick={() => handleRepairSingleLocal(selected.id)}>
+              🔧 Repair This Fault
             </button>
           )}
           <div className="info-hint">Drag to move · Right-click to pan</div>

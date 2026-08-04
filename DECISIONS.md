@@ -81,3 +81,24 @@ Running record of engineering decisions, their reasoning, and alternatives consi
 **Decision**: Separate `ticket_affected_poles` table instead of JSON array on the ticket.
 **Why**: Enables efficient "which tickets affect this pole?" queries, which are needed for restoration verification and cascaded fault detection.
 **Alternative**: JSON array column. Simpler but can't be indexed for reverse lookups.
+
+---
+
+## Known Limitations & Current Fragilities
+Honest accounting of areas where the current architecture exhibits trade-offs or vulnerabilities:
+
+1. **Inferred Topology in Urban Density:** For the 60% of transformers lacking field-surveyed wire ordering, our GPS nearest-neighbor heuristic assumes wires generally follow geodesic geometry. In dense urban informal settlements, overhead lines often double back through narrow building pathways. While our angular penalty mitigates trivial reversals, edge precision in ultra-dense informal grid sectors remains fragile without empirical line survey corrections.
+2. **Firmware 1.2 Latency Horizon:** Approximately 8% of field devices utilize legacy firmware 1.2, which does not transmit capacitor-backed dying gasps (`power_lost`). Our detection of outages across fw1.2 spans relies entirely on missed periodic heartbeats. With a 15-minute scheduled interval plus jitter, worst-case detection latency for an uninstrumented/legacy sector extends to **~16 minutes** (versus <60 seconds for fw1.3+ devices).
+3. **In-Memory Concurrency Bottleneck:** The authoritative runtime state (`PoleRuntimeState`), sequence deduplication cache, and corroboration buffers currently live in standard Python dictionary structures within a single asynchronous FastAPI/Uvicorn memory process. While this easily handles 5,000-message bursts with sub-millisecond locking overhead, it prevents multi-worker horizontal scaling or zero-downtime rolling deploys without externalizing state.
+
+---
+
+## What I Would Do With Two More Weeks
+
+If given an additional two weeks to evolve this MVP into a production-grade utility orchestration system, I would prioritize:
+
+1. **Empirical Topology Learning via Outage Correlation (Graph Inference V2):** Instead of static GPS distance approximation, I would analyze historical telemetry sequences over time. When a sector goes down, poles served by the same physical wire segment consistently drop out within seconds of each other across recurring blackout events. Building a statistically weighted co-occurrence covariance graph would automatically self-correct our GPS-inferred topology without costing the utility an 8-month physical field survey.
+2. **Externalized Shared Memory via Redis & Partitioned Postgres:** Replace in-memory pole dictionaries with a Redis cluster utilizing lightweight Hash/Bitmap structures and Redis Pub/Sub for Server-Sent Events broadcast. In Postgres, convert raw `telemetry_events` into a partitioned hypertable using **TimescaleDB** to sustain high-rate archival ingestion without index degradation.
+3. **Spatial Storm Sector Grouping:** During extreme monsoon storms, multiple adjacent feeders can trip simultaneously, flooding operators with dozens of individual feeder/DT tickets. I would implement hierarchical geospatial polygon clustering to bundle overlapping localized faults into a unified operational dashboard presentation: *"Storm Sector Warning: 8 Feeders Affected in Ward W-084"*.
+4. **Resilient Field Re-Sync (Dead-Letter Queue for Flappy IoT Relays):** Implement an explicit MQTT ingestion adapter backed by RabbitMQ or AWS IoT Core to gracefully buffer and retry flappy NB-IoT cell relays when cellular towers lose grid power during city-wide dropouts.
+

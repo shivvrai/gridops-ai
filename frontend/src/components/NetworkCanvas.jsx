@@ -210,6 +210,25 @@ function drawNode(ctx, n, isSel, isMultiSel, isBound, time) {
     ctx.restore()
   }
 
+  // Faulted pole/node visual indicator
+  if (n.isFault) {
+    ctx.save()
+    ctx.shadowColor = 'rgba(239, 68, 68, 0.85)'
+    ctx.shadowBlur = 16 + Math.sin(time * 0.08) * 6
+    ctx.beginPath(); ctx.arc(x, y, sz + 6, 0, Math.PI * 2)
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.stroke()
+    ctx.restore()
+
+    // Blinking red fault badge
+    ctx.save()
+    ctx.fillStyle = '#ef4444'
+    ctx.beginPath(); ctx.arc(x + sz + 3, y - sz - 3, 7, 0, Math.PI * 2); ctx.fill()
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText('×', x + sz + 3, y - sz - 3)
+    ctx.restore()
+  }
+
   ctx.save()
   switch (type) {
     case 'substation': {
@@ -412,7 +431,8 @@ function injectFault(nodes, edges) {
 /** BFS from substations over non-fault edges to derive live/dark statuses */
 function rederiveStatuses(nodes, edges) {
   const adj = {}
-  nodes.forEach(n => { adj[n.id] = [] })
+  const nMap = {}
+  nodes.forEach(n => { adj[n.id] = []; nMap[n.id] = n })
   edges.forEach(e => {
     if (e.status !== 'fault') {
       if (adj[e.from]) adj[e.from].push(e.to)
@@ -427,14 +447,20 @@ function rederiveStatuses(nodes, edges) {
 
   while (q.length) {
     const c = q.shift()
+    const cNode = nMap[c]
+    // Power cannot traverse through a faulted pole or transformer
+    if (cNode && cNode.isFault) continue
     for (const nb of (adj[c] || [])) {
-      if (!live.has(nb)) { live.add(nb); q.push(nb) }
+      const nbNode = nMap[nb]
+      if (nbNode && !nbNode.isFault && !live.has(nb)) {
+        live.add(nb); q.push(nb)
+      }
     }
   }
 
   return nodes.map(n => ({
     ...n,
-    status: live.has(n.id) ? 'live' : (Math.random() < 0.3 ? 'unknown' : 'dark'),
+    status: n.isFault ? 'confirmed_dark' : (live.has(n.id) ? 'live' : (Math.random() < 0.3 ? 'unknown' : 'dark')),
   }))
 }
 
@@ -454,7 +480,7 @@ function solveFault(nodes, edges) {
       const cn = nodes.find(n => n.id === ch.nid)
       if (!cn) continue
       if (node.status === 'live' && cn.status !== 'live') {
-        bounds.push({ live: id, dark: ch.nid, edge: ch.eid })
+        bounds.push({ live: id, dark: ch.nid, edge: ch.eid, isNodeFault: !!cn.isFault })
       } else {
         dfs(ch.nid)
       }
@@ -717,6 +743,21 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
             setFaultIds(prev => new Set(prev).add(ce.id))
             setBoundaries([])
           }
+        } else if (cn && cn.type !== 'substation') {
+          // Click a pole, DT, or home to toggle equipment failure fault
+          if (cn.isFault) {
+            const repairedNodes = s.nodes.map(nd => nd.id === cn.id ? { ...nd, isFault: false } : nd)
+            const newNodes = rederiveStatuses(repairedNodes, s.edges)
+            setNodes(newNodes)
+            setFaultIds(prev => { const next = new Set(prev); next.delete(cn.id); return next })
+            setBoundaries([])
+          } else {
+            const faultedNodes = s.nodes.map(nd => nd.id === cn.id ? { ...nd, isFault: true } : nd)
+            const newNodes = rederiveStatuses(faultedNodes, s.edges)
+            setNodes(newNodes)
+            setFaultIds(prev => new Set(prev).add(cn.id))
+            setBoundaries([])
+          }
         }
         break
       case 'delete':
@@ -831,18 +872,20 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
   const handleSolve = () => setBoundaries(solveFault(nodes, edges))
 
   const handleRepairAll = () => {
-    setNodes(p => p.map(n => ({ ...n, status: 'live' })))
+    setNodes(p => p.map(n => ({ ...n, status: 'live', isFault: false })))
     setEdges(p => p.map(e => ({ ...e, status: 'live' })))
     setBoundaries([]); setFaultIds(new Set()); setSelectedSet(new Set())
   }
 
   const handleRepairSelected = () => {
     const sel = S.current.selectedSet
-    // Repair only faulted edges that are in the selection
+    // Repair faulted edges and faulted nodes in selection
     const repairedEdges = edges.map(e => (sel.has(e.id) && e.status === 'fault') ? { ...e, status: 'live' } : e)
-    const newNodes = rederiveStatuses(nodes, repairedEdges)
+    const repairedNodes = nodes.map(n => (sel.has(n.id) && n.isFault) ? { ...n, isFault: false } : n)
+    const newNodes = rederiveStatuses(repairedNodes, repairedEdges)
     const remaining = new Set()
     repairedEdges.forEach(e => { if (e.status === 'fault') remaining.add(e.id) })
+    newNodes.forEach(n => { if (n.isFault) remaining.add(n.id) })
     setEdges(repairedEdges)
     setNodes(newNodes)
     setFaultIds(remaining)
@@ -850,17 +893,19 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
     setSelectedSet(new Set())
   }
 
-  const handleRepairSingle = (edgeId) => {
-    const repairedEdges = edges.map(e => e.id === edgeId ? { ...e, status: 'live' } : e)
-    const newNodes = rederiveStatuses(nodes, repairedEdges)
+  const handleRepairSingle = (id) => {
+    const repairedEdges = edges.map(e => e.id === id ? { ...e, status: 'live' } : e)
+    const repairedNodes = nodes.map(n => (n.id === id && n.isFault) ? { ...n, isFault: false } : n)
+    const newNodes = rederiveStatuses(repairedNodes, repairedEdges)
     const remaining = new Set()
     repairedEdges.forEach(e => { if (e.status === 'fault') remaining.add(e.id) })
+    newNodes.forEach(n => { if (n.isFault) remaining.add(n.id) })
     setEdges(repairedEdges)
     setNodes(newNodes)
     setFaultIds(remaining)
     setBoundaries([])
-    if (selected?.id === edgeId) setSelected(null)
-    setSelectedSet(prev => { const next = new Set(prev); next.delete(edgeId); return next })
+    if (selected?.id === id) setSelected(null)
+    setSelectedSet(prev => { const next = new Set(prev); next.delete(id); return next })
   }
 
   const handleClear = () => {
@@ -877,7 +922,7 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
   const faultCount = faultIds.size
   const hasAnyFault = faultCount > 0
   const hasUnfaultedSpans = edges.some(e => e.type === 'span' && e.status !== 'fault')
-  const selectedFaultCount = [...selectedSet].filter(id => edges.find(e => e.id === id && e.status === 'fault')).length
+  const selectedFaultCount = [...selectedSet].filter(id => faultIds.has(id)).length
 
   /* ---- RENDER ---- */
   return (
@@ -956,6 +1001,11 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
           {selected.meta?.dt_id && <div className="info-row"><span>DT</span><span className="info-val">{selected.meta.dt_id}</span></div>}
           {selected.meta?.feeder_id && <div className="info-row"><span>Feeder</span><span className="info-val">{selected.meta.feeder_id}</span></div>}
           {selected.meta?.pincode && <div className="info-row"><span>PIN</span><span className="info-val">{selected.meta.pincode}</span></div>}
+          {faultIds.has(selected.id) && (
+            <button className="canvas-act-btn repair single-repair-btn" onClick={() => handleRepairSingle(selected.id)}>
+              🔧 Repair Pole Fault
+            </button>
+          )}
           <div className="info-hint">Drag to move · Right-click to pan</div>
         </div>
       )}
@@ -990,10 +1040,13 @@ export default function NetworkCanvas({ poles, dts, edges: beEdges, tickets, sel
             <div key={i} className="solve-row">
               <span className="solve-live">● {nodes.find(n => n.id === b.live)?.label}</span>
               <span className="solve-arrow">→</span>
-              <span className="solve-dark">● {nodes.find(n => n.id === b.dark)?.label}</span>
+              <span className="solve-dark">
+                ● {nodes.find(n => n.id === b.dark)?.label}
+                {b.isNodeFault ? ' (Pole Failure)' : ' (Wire Span Break)'}
+              </span>
             </div>
           ))}
-          <div className="solve-hint">Fault is on the span between these boundary poles</div>
+          <div className="solve-hint">Identifies transition between energized and faulted equipment</div>
         </div>
       )}
 

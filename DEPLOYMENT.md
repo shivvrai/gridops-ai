@@ -87,9 +87,82 @@ docker compose up --build
 - The seed generator creates ~3,800 poles — this takes ~5 seconds
 - Topology inference for ~250 inferred DTs takes ~3 seconds
 
+## Cloud Deployment (Vercel + Backend)
+
+This project has a **React (Vite) Frontend** and a **FastAPI (Python) Backend**.
+
+### Architecture Overview
+- **Frontend on Vercel**: Vercel provides world-class global edge CDN hosting for Vite Single Page Applications.
+- **Backend on Render / Railway / Fly.io**: The backend requires long-lived state (in-memory topology graph, 10s background sweep loop, and Server-Sent Events). It runs best on a container host.
+
+---
+
+### Step 1: Deploy Backend (Render / Railway / Fly.io)
+
+Using **Render** (Free tier available):
+1. Create a free account at [render.com](https://render.com).
+2. Click **New +** -> **Web Service**.
+3. Connect your GitHub repository.
+4. Configure service settings:
+   - **Name**: `faultloc-backend`
+   - **Root Directory**: `backend`
+   - **Runtime**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+5. Click **Deploy Web Service**.
+6. Copy your public URL (e.g. `https://faultloc-backend.onrender.com`).
+
+---
+
+### Step 2: Deploy Frontend on Vercel
+
+#### Method A: Via Vercel Web Dashboard (Recommended)
+1. Push your latest code to GitHub:
+   ```bash
+   git add .
+   git commit -m "Add industry features and Vercel config"
+   git push origin main
+   ```
+2. Log in to [vercel.com](https://vercel.com) and click **"Add New..."** -> **"Project"**.
+3. Import your GitHub repository.
+4. In the **Configure Project** screen:
+   - **Framework Preset**: `Vite`
+   - **Root Directory**: Click *Edit* and select `frontend`
+   - **Build Command**: `npm run build` (default)
+   - **Output Directory**: `dist` (default)
+5. Expand **Environment Variables**:
+   - **Key**: `VITE_API_BASE_URL`
+   - **Value**: `https://faultloc-backend.onrender.com` (your backend URL from Step 1)
+6. Click **Deploy**.
+   Your application will be live at `https://your-project.vercel.app`.
+
+#### Method B: Via Vercel CLI
+```bash
+cd frontend
+npm install -g vercel
+vercel
+```
+When prompted:
+- Set up and deploy: **Y**
+- Which scope: *(your account)*
+- Link to existing project: **N**
+- Project name: `fault-localization-ui`
+- In which directory is your code located: `./`
+- Want to modify settings: **N**
+
+Then set the environment variable:
+```bash
+vercel env add VITE_API_BASE_URL
+# Enter your backend URL when prompted (e.g., https://faultloc-backend.onrender.com)
+vercel --prod
+```
+
+---
+
 ## Running Tests
 
 ```bash
 cd backend
 python -m pytest tests/ -v
 ```
+

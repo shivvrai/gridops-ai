@@ -3,11 +3,15 @@ import NetworkCanvas from './components/NetworkCanvas'
 import TicketList from './components/TicketList'
 import TicketDetail from './components/TicketDetail'
 import SimulatorPanel from './components/SimulatorPanel'
+import DashboardPanel from './components/DashboardPanel'
+import DataLoaderPanel from './components/DataLoaderPanel'
 import ToastContainer from './components/ToastContainer'
 
-const API_URL = window.location.hostname === 'localhost'
-  ? 'http://localhost:8000'
-  : `${window.location.protocol}//${window.location.hostname}:8000`
+const API_URL = import.meta.env.VITE_API_BASE_URL || (
+  window.location.hostname === 'localhost'
+    ? 'http://localhost:8000'
+    : `${window.location.protocol}//${window.location.hostname}:8000`
+)
 
 function App() {
   const [tickets, setTickets] = useState([])
@@ -156,7 +160,9 @@ function App() {
     }
     return null
   }
-  const activeTickets = tickets.filter(t => !['verified', 'closed'].includes(t.status))
+  const activeTickets = tickets
+    .filter(t => !['verified', 'closed'].includes(t.status))
+    .sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0))
   const recentTickets = tickets.filter(t => ['verified', 'closed'].includes(t.status)).slice(0, 10)
 
   const handleInjectFault = async (type, targetId, parentId) => {
@@ -247,10 +253,22 @@ function App() {
             🎫 Tickets ({activeTickets.length})
           </button>
           <button
+            className={`sidebar-tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            📊 Dashboard
+          </button>
+          <button
             className={`sidebar-tab ${activeTab === 'simulator' ? 'active' : ''}`}
             onClick={() => setActiveTab('simulator')}
           >
             🔧 Simulator
+          </button>
+          <button
+            className={`sidebar-tab ${activeTab === 'data' ? 'active' : ''}`}
+            onClick={() => setActiveTab('data')}
+          >
+            📤 Data
           </button>
         </div>
 
@@ -262,6 +280,10 @@ function App() {
               selectedId={selectedTicket?.display_id}
               onSelect={(t) => setSelectedTicket(t)}
             />
+          ) : activeTab === 'dashboard' ? (
+            <DashboardPanel apiUrl={API_URL} />
+          ) : activeTab === 'data' ? (
+            <DataLoaderPanel apiUrl={API_URL} />
           ) : (
             <SimulatorPanel
               networkInfo={networkInfo}

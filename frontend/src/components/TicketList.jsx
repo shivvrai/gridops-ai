@@ -26,6 +26,14 @@ function TicketList({ tickets, recentTickets, selectedId, onSelect }) {
     }
   }
 
+  const getPriorityBadge = (ticket) => {
+    const score = ticket.priority_score || 0
+    if (score >= 400) return <span className="priority-badge priority-critical">CRITICAL</span>
+    if (score >= 200) return <span className="priority-badge priority-high">HIGH</span>
+    if (score > 0) return <span className="priority-badge priority-moderate">MODERATE</span>
+    return null
+  }
+
   return (
     <div>
       {tickets.length > 0 && (
@@ -40,7 +48,10 @@ function TicketList({ tickets, recentTickets, selectedId, onSelect }) {
               onClick={() => onSelect(ticket)}
             >
               <div className="ticket-header">
-                <span className="ticket-id">{ticket.display_id}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="ticket-id">{ticket.display_id}</span>
+                  {getPriorityBadge(ticket)}
+                </div>
                 <span className={`ticket-badge badge-${ticket.status}`}>
                   {ticket.status}
                 </span>
@@ -56,8 +67,13 @@ function TicketList({ tickets, recentTickets, selectedId, onSelect }) {
                     {ticket.confidence_label}
                   </span>
                 </span>
-                <span>👥 ~{ticket.estimated_households || '?'} homes</span>
-                <span>📍 {ticket.affected_pole_count} poles</span>
+                <span>👥 ~{ticket.estimated_households || '?'}</span>
+                <span>📍 {ticket.affected_pole_count}p</span>
+                {ticket.total_dark_line_length_m > 0 && (
+                  <span style={{ color: '#60a5fa', fontWeight: 600 }}>
+                    📏 {Math.round(ticket.total_dark_line_length_m)}m
+                  </span>
+                )}
                 <span>🕐 {formatTime(ticket.detected_at)}</span>
               </div>
             </div>

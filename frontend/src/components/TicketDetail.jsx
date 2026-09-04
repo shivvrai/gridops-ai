@@ -14,6 +14,20 @@ function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
 
   const transition = TRANSITIONS[ticket.status]
 
+  const getPriorityClass = (t) => {
+    const score = t.priority_score || 0
+    if (score >= 400) return 'priority-critical'
+    if (score >= 200) return 'priority-high'
+    return 'priority-moderate'
+  }
+
+  const getPriorityLabel = (t) => {
+    const score = t.priority_score || 0
+    if (score >= 400) return '🔴 CRITICAL'
+    if (score >= 200) return '🟡 HIGH'
+    return '🟢 MODERATE'
+  }
+
   const handleTransition = async () => {
     if (!transition) return
     setTransitioning(true)
@@ -41,9 +55,16 @@ function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
       <div className="detail-header">
         <div>
           <h2 style={{ fontSize: 18, fontWeight: 700 }}>{ticket.display_id}</h2>
-          <span className={`ticket-badge badge-${ticket.status}`} style={{ marginTop: 4, display: 'inline-block' }}>
-            {ticket.status}
-          </span>
+          <div style={{ display: 'flex', gap: 6, marginTop: 4, alignItems: 'center' }}>
+            <span className={`ticket-badge badge-${ticket.status}`}>
+              {ticket.status}
+            </span>
+            {ticket.priority_score && (
+              <span className={`priority-badge ${getPriorityClass(ticket)}`}>
+                {getPriorityLabel(ticket)}
+              </span>
+            )}
+          </div>
         </div>
         <button className="detail-close" onClick={onClose}>✕</button>
       </div>
@@ -80,9 +101,9 @@ function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
         )}
       </div>
 
-      {/* Location */}
+      {/* Location + Navigation */}
       <div className="detail-section">
-        <h3>Location</h3>
+        <h3>Location & Navigation</h3>
         <div className="detail-row">
           <span className="label">Coordinates</span>
           <span className="value" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
@@ -93,7 +114,48 @@ function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
           <span className="label">PIN Code</span>
           <span className="value">{ticket.pincode || 'Unknown'}</span>
         </div>
+        {ticket.fault_lat && ticket.fault_lon && (
+          <a
+            href={`https://www.google.com/maps?q=${ticket.fault_lat},${ticket.fault_lon}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-nav"
+            style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center', textDecoration: 'none' }}
+          >
+            📍 Navigate to Fault Location (Google Maps)
+          </a>
+        )}
       </div>
+
+      {/* Distance Metrics */}
+      {(ticket.span_distance_m || ticket.total_dark_line_length_m || ticket.dt_distance_m) && (
+        <div className="detail-section">
+          <h3>📏 Distance Metrics</h3>
+          {ticket.span_distance_m > 0 && (
+            <div className="detail-row">
+              <span className="label">Fault Span</span>
+              <span className="value distance-value">{Math.round(ticket.span_distance_m)}m</span>
+            </div>
+          )}
+          {ticket.total_dark_line_length_m > 0 && (
+            <div className="detail-row">
+              <span className="label">Dark Line Length</span>
+              <span className="value distance-value">{Math.round(ticket.total_dark_line_length_m)}m</span>
+            </div>
+          )}
+          {ticket.dt_distance_m > 0 && (
+            <div className="detail-row">
+              <span className="label">Distance from DT</span>
+              <span className="value distance-value">{Math.round(ticket.dt_distance_m)}m</span>
+            </div>
+          )}
+          {ticket.total_dark_line_length_m > 0 && (
+            <div style={{ background: 'rgba(59, 130, 246, 0.06)', padding: '6px 10px', borderRadius: 6, fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>
+              Est. drive distance: ~{Math.round(ticket.dt_distance_m * 1.4)}m (road factor ×1.4)
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Impact */}
       <div className="detail-section">

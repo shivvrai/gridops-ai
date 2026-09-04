@@ -71,7 +71,7 @@ class Pole(Base):
 class TelemetryEvent(Base):
     __tablename__ = "telemetry_events"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer().with_variant(BigInteger, "postgresql"), primary_key=True, autoincrement=True)
     device_id = Column(Text, nullable=False)
     pole_id = Column(Text, nullable=False)
     event = Column(Text, nullable=False)
@@ -114,7 +114,7 @@ class PoleState(Base):
 class Ticket(Base):
     __tablename__ = "tickets"
 
-    ticket_id = Column(BigInteger, primary_key=True, autoincrement=True)
+    ticket_id = Column(Integer().with_variant(BigInteger, "postgresql"), primary_key=True, autoincrement=True)
     display_id = Column(Text, unique=True, nullable=False)
     status = Column(Text, nullable=False, default="detected")
     fault_type = Column(Text, nullable=False)
@@ -149,6 +149,14 @@ class Ticket(Base):
     verified_at = Column(DateTime(timezone=True))
     closed_at = Column(DateTime(timezone=True))
 
+    # Distance metrics (meters)
+    span_distance_m = Column(Float)
+    total_dark_line_length_m = Column(Float)
+    dt_distance_m = Column(Float)
+
+    # Priority
+    priority_score = Column(Float)
+
     # Suppression
     suppressed_by_outage = Column(Text)
 
@@ -165,7 +173,7 @@ class Ticket(Base):
 class TicketAffectedPole(Base):
     __tablename__ = "ticket_affected_poles"
 
-    ticket_id = Column(BigInteger, ForeignKey("tickets.ticket_id"), primary_key=True)
+    ticket_id = Column(Integer().with_variant(BigInteger, "postgresql"), ForeignKey("tickets.ticket_id"), primary_key=True)
     pole_id = Column(Text, ForeignKey("poles.pole_id"), primary_key=True)
 
     ticket = relationship("Ticket", back_populates="affected_poles")

@@ -24,7 +24,7 @@ from app.core.topology import build_network_graph, PoleInfo, DTInfo
 from app.core.localization import LocalizationEngine
 from app.core.ticket_manager import TicketManager
 from app.core.simulator import FaultSimulator
-from app.api import telemetry, tickets, simulator, events, ai
+from app.api import telemetry, tickets, simulator, events, ai, analytics, data_loader, outages
 from app.api.events import broadcast_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -279,6 +279,9 @@ app.include_router(tickets.router)
 app.include_router(simulator.router)
 app.include_router(events.router)
 app.include_router(ai.router)
+app.include_router(analytics.router)
+app.include_router(data_loader.router)
+app.include_router(outages.router)
 
 
 @app.get("/api/health")

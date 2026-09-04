@@ -488,6 +488,7 @@ async def get_edges():
             "to_lon": v_data.get("lon"),
             "topology_source": data.get("topology_source", "unknown"),
             "topology_confidence": data.get("topology_confidence", "MEDIUM"),
+            "distance_m": data.get("distance_m", 0.0),
         })
 
     return edges

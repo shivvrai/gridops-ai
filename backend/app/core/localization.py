@@ -53,6 +53,10 @@ class FaultBoundary:
     topology_source: str = "unknown"
     topology_confidence: str = "MEDIUM"
     detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Distance metrics (meters)
+    span_distance_m: float = 0.0       # Distance of the faulted span
+    total_dark_line_length_m: float = 0.0  # Total de-energized line length
+    dt_distance_m: float = 0.0         # Distance from DT to fault point
 
 
 @dataclass
@@ -345,6 +349,9 @@ class LocalizationEngine:
 
                 # Real fault boundary
                 affected = self._collect_dark_subtree(child_id, tree)
+                span_dist = edge_data.get("distance_m", 0.0)
+                dark_length = self._sum_subtree_distance(child_id, tree)
+                dt_dist = self._path_distance_to_dt(node_id, dt_id, tree)
                 boundary = FaultBoundary(
                     boundary_live_pole=node_id if node_id != dt_id else None,
                     boundary_dark_pole=child_id,
@@ -355,6 +362,9 @@ class LocalizationEngine:
                     topology_source=topo_source,
                     topology_confidence=topo_conf,
                     detected_at=now,
+                    span_distance_m=span_dist,
+                    total_dark_line_length_m=dark_length,
+                    dt_distance_m=dt_dist,
                 )
                 boundaries.append(boundary)
                 # Don't walk further — everything downstream is affected
@@ -382,6 +392,9 @@ class LocalizationEngine:
                         # All known grandchildren dark → fault in the gap
                         affected = self._collect_dark_subtree(child_id, tree)
                         uninstrumented = 1  # at least the unknown pole
+                        span_dist = edge_data.get("distance_m", 0.0)
+                        dark_length = self._sum_subtree_distance(child_id, tree)
+                        dt_dist = self._path_distance_to_dt(node_id, dt_id, tree)
                         boundary = FaultBoundary(
                             boundary_live_pole=node_id if node_id != dt_id else None,
                             boundary_dark_pole=child_id,
@@ -395,6 +408,9 @@ class LocalizationEngine:
                             topology_source=topo_source,
                             topology_confidence="LOW",
                             detected_at=now,
+                            span_distance_m=span_dist,
+                            total_dark_line_length_m=dark_length,
+                            dt_distance_m=dt_dist,
                         )
                         boundaries.append(boundary)
                     elif has_live_gc:
@@ -434,6 +450,34 @@ class LocalizationEngine:
             if child_state.status in ("confirmed_dark", "suspected_dark", "unknown"):
                 affected.extend(self._collect_dark_subtree(child, tree))
         return affected
+
+    def _sum_subtree_distance(self, root_id: str, tree: nx.DiGraph) -> float:
+        """Sum all edge distances in the subtree rooted at root_id."""
+        total = 0.0
+        for child in tree.successors(root_id):
+            edge_data = tree.edges.get((root_id, child), {})
+            total += edge_data.get("distance_m", 0.0)
+            total += self._sum_subtree_distance(child, tree)
+        return round(total, 1)
+
+    def _path_distance_to_dt(self, node_id: str, dt_id: str, tree: nx.DiGraph) -> float:
+        """Compute distance from a node back to the DT root along the tree path."""
+        if node_id == dt_id:
+            return 0.0
+        # Walk predecessors (tree is a DiGraph, each node has at most one predecessor)
+        total = 0.0
+        current = node_id
+        visited = set()
+        while current != dt_id and current not in visited:
+            visited.add(current)
+            preds = list(tree.predecessors(current))
+            if not preds:
+                break
+            parent = preds[0]
+            edge_data = tree.edges.get((parent, current), {})
+            total += edge_data.get("distance_m", 0.0)
+            current = parent
+        return round(total, 1)
 
     def _detect_feeder_faults(self, dt_boundaries: list[FaultBoundary]) -> list[FaultBoundary]:
         """Check if all DTs on a feeder are dark → feeder-level fault."""

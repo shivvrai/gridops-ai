@@ -46,6 +46,25 @@ class TicketManager:
         # SSE event callback (set by the app)
         self.on_ticket_event: Optional[callable] = None
 
+    async def _generate_display_id(self, db: AsyncSession) -> str:
+        """Generate a unique human-readable ticket display ID collision-safe with the DB."""
+        date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+        prefix = f"FLT-{date_str}-"
+        result = await db.execute(
+            select(Ticket.display_id).where(Ticket.display_id.like(f"{prefix}%"))
+        )
+        existing = result.scalars().all()
+        max_num = 0
+        for eid in existing:
+            try:
+                num = int(eid.split("-")[-1])
+                if num > max_num:
+                    max_num = num
+            except (ValueError, IndexError):
+                pass
+        self.engine._ticket_counter = max(self.engine._ticket_counter, max_num) + 1
+        return f"FLT-{date_str}-{self.engine._ticket_counter:03d}"
+
     async def create_ticket_from_boundary(
         self, boundary: FaultBoundary, db: AsyncSession
     ) -> Optional[dict]:
@@ -56,10 +75,13 @@ class TicketManager:
         # Compute fault location (midpoint of boundary span)
         fault_lat, fault_lon, pincode = self._compute_location(boundary)
 
-        display_id = self.engine.next_display_id()
+        display_id = await self._generate_display_id(db)
 
         # Estimate affected households
         estimated_households = self._estimate_households(boundary)
+
+        # Compute priority score for triage sorting
+        priority_score = self._compute_priority(boundary, estimated_households)
 
         ticket = Ticket(
             display_id=display_id,
@@ -80,6 +102,10 @@ class TicketManager:
             confidence_factors=confidence_factors,
             topology_source=boundary.topology_source,
             detected_at=boundary.detected_at,
+            span_distance_m=boundary.span_distance_m,
+            total_dark_line_length_m=boundary.total_dark_line_length_m,
+            dt_distance_m=boundary.dt_distance_m,
+            priority_score=priority_score,
         )
 
         db.add(ticket)
@@ -280,6 +306,23 @@ class TicketManager:
             return int(total_households * affected_ratio)
         return 0
 
+    def _compute_priority(self, boundary: FaultBoundary, estimated_households: int) -> float:
+        """Compute a severity priority score for triage sorting (higher = more urgent)."""
+        score = 0.0
+        # Weight by affected poles
+        score += min(len(boundary.affected_poles), 100) * 2.0
+        # Weight by estimated households
+        score += min(estimated_households, 500) * 1.0
+        # Bonus for DT/feeder-level faults (wider impact)
+        if boundary.fault_type == "feeder":
+            score += 500
+        elif boundary.fault_type == "dt":
+            score += 200
+        # Bonus for longer dark line (more infrastructure affected)
+        if boundary.total_dark_line_length_m > 0:
+            score += min(boundary.total_dark_line_length_m / 10, 100)
+        return round(score, 1)
+
     def _cleanup_ticket(self, display_id: str):
         """Remove pole-to-ticket mappings for a closed/verified ticket."""
         ticket_data = self.active_tickets.get(display_id)
@@ -310,6 +353,10 @@ class TicketManager:
             "confidence_label": ticket.confidence_label,
             "confidence_factors": ticket.confidence_factors,
             "topology_source": ticket.topology_source,
+            "span_distance_m": ticket.span_distance_m,
+            "total_dark_line_length_m": ticket.total_dark_line_length_m,
+            "dt_distance_m": ticket.dt_distance_m,
+            "priority_score": ticket.priority_score,
             "detected_at": ticket.detected_at.isoformat() if ticket.detected_at else None,
             "acknowledged_at": ticket.acknowledged_at.isoformat() if ticket.acknowledged_at else None,
             "crew_assigned_at": ticket.crew_assigned_at.isoformat() if ticket.crew_assigned_at else None,

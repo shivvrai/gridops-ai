@@ -80,7 +80,7 @@ def infer_topology_for_dt(
     Infer pole ordering for a DT with missing topology using GPS-based
     greedy tree construction (Prim's-like, rooted at DT).
 
-    Returns list of (parent_pole_id, child_pole_id, confidence) tuples.
+    Returns list of (parent_pole_id, child_pole_id, confidence, distance_m) tuples.
     confidence is "HIGH", "MEDIUM", or "LOW".
     """
     if not poles:
@@ -123,7 +123,7 @@ def infer_topology_for_dt(
     first_pole = poles[first_idx]
     first_dist = dt_dists[first_idx]
     edges.append((dt.dt_id, first_pole.pole_id,
-                  "HIGH" if first_dist < mean_dist else "MEDIUM"))
+                  "HIGH" if first_dist < mean_dist else "MEDIUM", first_dist))
     assigned.add(first_idx)
 
     # Frontier: set of assigned pole indices
@@ -182,7 +182,8 @@ def infer_topology_for_dt(
                     near_indices = sorted(range(len(poles)), key=lambda i: dists_all[i])
                     for near_idx in near_indices:
                         if near_idx in assigned:
-                            edges.append((poles[near_idx].pole_id, poles[idx].pole_id, "LOW"))
+                            force_dist = math.sqrt((poles[idx].lat*METERS_PER_DEG_LAT - poles[near_idx].lat*METERS_PER_DEG_LAT)**2 + (poles[idx].lon*METERS_PER_DEG_LON - poles[near_idx].lon*METERS_PER_DEG_LON)**2)
+                            edges.append((poles[near_idx].pole_id, poles[idx].pole_id, "LOW", force_dist))
                             assigned.add(idx)
                             break
             break
@@ -190,7 +191,7 @@ def infer_topology_for_dt(
         parent_idx, child_idx = best_edge
         parent_pole_id = poles[parent_idx].pole_id
         child_pole_id = poles[child_idx].pole_id
-        edges.append((parent_pole_id, child_pole_id, best_confidence))
+        edges.append((parent_pole_id, child_pole_id, best_confidence, best_dist))
         assigned.add(child_idx)
         frontier.add(child_idx)
 
@@ -253,6 +254,7 @@ def build_network_graph(
         if dt.has_surveyed_topology:
             # Surveyed: use parent_pole_id directly
             surveyed_count += 1
+            pole_by_id_local = {p.pole_id: p for p in dt_pole_list}
             for p in dt_pole_list:
                 G.add_node(p.pole_id, node_type="pole", lat=p.lat, lon=p.lon,
                            dt_id=p.dt_id, feeder_id=p.feeder_id,
@@ -261,14 +263,20 @@ def build_network_graph(
                            topology_confidence="HIGH",
                            fw_version=p.fw_version)
                 if p.parent_pole_id:
+                    # Compute span distance from GPS
+                    parent = pole_by_id_local.get(p.parent_pole_id)
+                    dist = _haversine_m(parent.lat, parent.lon, p.lat, p.lon) if parent else 0.0
                     G.add_edge(p.parent_pole_id, p.pole_id,
                                edge_type="span", topology_source="surveyed",
-                               topology_confidence="HIGH")
+                               topology_confidence="HIGH",
+                               distance_m=round(dist, 1))
                 else:
                     # Root pole: connect to DT
+                    dist = _haversine_m(dt.lat, dt.lon, p.lat, p.lon)
                     G.add_edge(dt.dt_id, p.pole_id,
                                edge_type="span", topology_source="surveyed",
-                               topology_confidence="HIGH")
+                               topology_confidence="HIGH",
+                               distance_m=round(dist, 1))
         else:
             # Missing topology: infer from GPS
             inferred_count += 1
@@ -281,10 +289,11 @@ def build_network_graph(
                            fw_version=p.fw_version)
 
             inferred_edges = infer_topology_for_dt(dt, dt_pole_list)
-            for parent_id, child_id, confidence in inferred_edges:
+            for parent_id, child_id, confidence, dist in inferred_edges:
                 G.add_edge(parent_id, child_id,
                            edge_type="span", topology_source="inferred_gps",
-                           topology_confidence=confidence)
+                           topology_confidence=confidence,
+                           distance_m=round(dist, 1))
 
     logger.info(f"Network graph built: {G.number_of_nodes()} nodes, "
                 f"{G.number_of_edges()} edges. "

@@ -365,3 +365,257 @@ async def data_status(db: AsyncSession = Depends(get_db)):
         "graph_nodes": engine.network_graph.number_of_nodes() if graph_built else 0,
         "graph_edges": engine.network_graph.number_of_edges() if graph_built else 0,
     }
+
+
+# Outage CSV requirements
+OUTAGE_REQUIRED = {"outage_id", "scope", "target_id", "scheduled_start", "scheduled_end"}
+
+
+@router.get("/template/outages")
+async def download_outages_template():
+    """Return a sample CSV template for scheduled outages feed."""
+    csv_content = (
+        "outage_id,scope,target_id,scheduled_start,scheduled_end,reason\n"
+        "SO-2026-07-29-014,feeder,F-07-03,2026-07-29T10:00:00Z,2026-07-29T12:30:00Z,Planned maintenance - jumper replacement\n"
+        "SO-2026-07-29-021,dt,D-0112,2026-07-29T14:00:00Z,2026-07-29T15:00:00Z,Load shedding\n"
+    )
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=outages_template.csv"}
+    )
+
+
+@router.post("/upload/outages")
+async def upload_outages_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    """Upload a scheduled outages CSV file. Validates and saves to DB."""
+    from datetime import datetime, timezone, timedelta
+    from app.models.schemas import ScheduledOutage
+    from app.config import settings
+
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a .csv")
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+
+    header = set(rows[0].keys())
+    missing = OUTAGE_REQUIRED - header
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required columns: {', '.join(sorted(missing))}. Required: {', '.join(sorted(OUTAGE_REQUIRED))}"
+        )
+
+    valid_rows = []
+    invalid_rows = []
+    warnings = []
+
+    for i, row in enumerate(rows, 1):
+        errors = []
+        for col in OUTAGE_REQUIRED:
+            if col not in row or not row[col].strip():
+                errors.append(f"Missing required column: {col}")
+
+        if not errors:
+            scope = row["scope"].strip().lower()
+            if scope not in ("feeder", "dt"):
+                errors.append(f"Row {i}: Invalid scope '{scope}'. Must be 'feeder' or 'dt'.")
+
+            try:
+                start = datetime.fromisoformat(row["scheduled_start"].replace("Z", "+00:00"))
+                end = datetime.fromisoformat(row["scheduled_end"].replace("Z", "+00:00"))
+                if end <= start:
+                    errors.append(f"Row {i}: scheduled_end must be after scheduled_start.")
+            except ValueError:
+                errors.append(f"Row {i}: Invalid ISO datetime format.")
+
+        if errors:
+            invalid_rows.append({"row": i, "errors": errors})
+        else:
+            valid_rows.append(row)
+
+    # Upsert valid outages
+    saved_count = 0
+    for r in valid_rows:
+        outage_id = r["outage_id"].strip()
+        scope = r["scope"].strip().lower()
+        target_id = r["target_id"].strip()
+        start = datetime.fromisoformat(r["scheduled_start"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(r["scheduled_end"].replace("Z", "+00:00"))
+        grace = end + timedelta(minutes=settings.grace_period_minutes)
+        reason = r.get("reason", "").strip() or "Scheduled maintenance"
+
+        outage = await db.get(ScheduledOutage, outage_id)
+        if outage:
+            outage.scope = scope
+            outage.target_id = target_id
+            outage.scheduled_start = start
+            outage.scheduled_end = end
+            outage.grace_end = grace
+            outage.reason = reason
+            outage.cancelled = False
+        else:
+            outage = ScheduledOutage(
+                outage_id=outage_id,
+                scope=scope,
+                target_id=target_id,
+                scheduled_start=start,
+                scheduled_end=end,
+                grace_end=grace,
+                reason=reason,
+                cancelled=False,
+            )
+            db.add(outage)
+        saved_count += 1
+
+    await db.commit()
+
+    return {
+        "status": "validated",
+        "filename": file.filename,
+        "total_rows": len(rows),
+        "valid_rows": len(valid_rows),
+        "invalid_rows": len(invalid_rows),
+        "saved_to_db": saved_count,
+        "warnings": warnings,
+        "invalid_details": invalid_rows[:20],
+    }
+
+
+@router.post("/preview")
+async def preview_csv_data(file: UploadFile = File(...), entity: str = "pole"):
+    """
+    Generate an inspection preview of an uploaded CSV file.
+    Returns detected columns, column types, cell error coordinates, and first 50 rows.
+    """
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must be a .csv")
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+
+    columns = list(rows[0].keys())
+    required_cols = (
+        POLE_REQUIRED if entity == "pole"
+        else DT_REQUIRED if entity == "dt"
+        else OUTAGE_REQUIRED
+    )
+
+    cell_errors = []
+    preview_rows = rows[:50]
+
+    for row_idx, row in enumerate(preview_rows, start=1):
+        for col in columns:
+            val = row.get(col, "").strip()
+            # Missing required field
+            if col in required_cols and not val:
+                cell_errors.append({
+                    "row": row_idx,
+                    "column": col,
+                    "reason": "Missing required value",
+                })
+            # Coordinate checks
+            elif col == "lat" and val:
+                try:
+                    lat_f = float(val)
+                    if not (6.0 <= lat_f <= 38.0):
+                        cell_errors.append({"row": row_idx, "column": col, "reason": "Out of India range (6-38°N)"})
+                except ValueError:
+                    cell_errors.append({"row": row_idx, "column": col, "reason": "Invalid number"})
+            elif col == "lon" and val:
+                try:
+                    lon_f = float(val)
+                    if not (66.0 <= lon_f <= 98.0):
+                        cell_errors.append({"row": row_idx, "column": col, "reason": "Out of India range (66-98°E)"})
+                except ValueError:
+                    cell_errors.append({"row": row_idx, "column": col, "reason": "Invalid number"})
+
+    return {
+        "filename": file.filename,
+        "entity": entity,
+        "total_rows": len(rows),
+        "columns": columns,
+        "required_columns": list(required_cols),
+        "preview_rows": preview_rows,
+        "cell_errors": cell_errors,
+    }
+
+
+@router.post("/error-report")
+async def download_error_report(file: UploadFile = File(...), entity: str = "pole"):
+    """Validate CSV and return a downloadable CSV of all row-level errors."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+
+    required_cols = (
+        POLE_REQUIRED if entity == "pole"
+        else DT_REQUIRED if entity == "dt"
+        else OUTAGE_REQUIRED
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["row_number", "field", "value", "error_description"])
+
+    id_col = "pole_id" if entity == "pole" else "dt_id" if entity == "dt" else "outage_id"
+    seen_ids = set()
+
+    for i, row in enumerate(rows, start=1):
+        for col in required_cols:
+            val = row.get(col, "").strip()
+            if not val:
+                writer.writerow([i, col, "", f"Missing required column {col}"])
+
+        if "lat" in row and row["lat"].strip():
+            try:
+                lat = float(row["lat"])
+                if not (6.0 <= lat <= 38.0):
+                    writer.writerow([i, "lat", row["lat"], "Latitude outside territory (6-38°N)"])
+            except ValueError:
+                writer.writerow([i, "lat", row["lat"], "Invalid float for latitude"])
+
+        if "lon" in row and row["lon"].strip():
+            try:
+                lon = float(row["lon"])
+                if not (66.0 <= lon <= 98.0):
+                    writer.writerow([i, "lon", row["lon"], "Longitude outside territory (66-98°E)"])
+            except ValueError:
+                writer.writerow([i, "lon", row["lon"], "Invalid float for longitude"])
+
+        eid = row.get(id_col, "").strip()
+        if eid:
+            if eid in seen_ids:
+                writer.writerow([i, id_col, eid, f"Duplicate identifier {eid}"])
+            seen_ids.add(eid)
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={entity}_error_report.csv"}
+    )
+

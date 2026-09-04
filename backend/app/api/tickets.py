@@ -73,6 +73,8 @@ async def list_tickets(
             "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
             "verified_at": t.verified_at.isoformat() if t.verified_at else None,
             "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+            "assigned_crew_id": t.assigned_crew_id,
+            "field_notes": t.field_notes,
             "operator_notes": t.operator_notes,
         })
 
@@ -95,6 +97,24 @@ async def get_ticket(display_id: str, db: AsyncSession = Depends(get_db)):
         )
     )
     affected_poles = [r[0] for r in poles_result.all()]
+
+    # Fetch history
+    from app.models.schemas import TicketTransitionHistory
+    hist_result = await db.execute(
+        select(TicketTransitionHistory)
+        .where(TicketTransitionHistory.ticket_id == ticket.ticket_id)
+        .order_by(TicketTransitionHistory.timestamp.asc())
+    )
+    history = [
+        {
+            "from_status": h.from_status,
+            "to_status": h.to_status,
+            "user_name": h.user_name,
+            "notes": h.notes,
+            "timestamp": h.timestamp.isoformat() if h.timestamp else None,
+        }
+        for h in hist_result.scalars().all()
+    ]
 
     return {
         "ticket_id": ticket.ticket_id,
@@ -126,7 +146,10 @@ async def get_ticket(display_id: str, db: AsyncSession = Depends(get_db)):
         "resolved_at": ticket.resolved_at.isoformat() if ticket.resolved_at else None,
         "verified_at": ticket.verified_at.isoformat() if ticket.verified_at else None,
         "closed_at": ticket.closed_at.isoformat() if ticket.closed_at else None,
+        "assigned_crew_id": ticket.assigned_crew_id,
+        "field_notes": ticket.field_notes,
         "operator_notes": ticket.operator_notes,
+        "history": history,
     }
 
 
@@ -138,6 +161,13 @@ async def transition_ticket(
 ):
     """Transition a ticket to a new status."""
     from app.main import app_state
+    from app.models.schemas import TicketTransitionHistory
+    from app.core.auth import record_audit_log
+
+    # Get current status before transition
+    ticket_query = await db.execute(select(Ticket).where(Ticket.display_id == display_id))
+    ticket_before = ticket_query.scalar_one_or_none()
+    old_status = ticket_before.status if ticket_before else "unknown"
 
     ticket_manager = app_state["ticket_manager"]
     success, message = await ticket_manager.transition_ticket(
@@ -146,5 +176,24 @@ async def transition_ticket(
 
     if not success:
         raise HTTPException(status_code=400, detail=message)
+
+    # Record in transition history
+    if ticket_before:
+        hist = TicketTransitionHistory(
+            ticket_id=ticket_before.ticket_id,
+            display_id=display_id,
+            from_status=old_status,
+            to_status=request.status,
+            user_name="Operator Console",
+            notes=request.operator_notes,
+        )
+        db.add(hist)
+        await db.commit()
+
+        await record_audit_log(
+            db, action="TICKET_TRANSITION",
+            entity_type="ticket", entity_id=display_id,
+            details={"from": old_status, "to": request.status, "notes": request.operator_notes},
+        )
 
     return {"status": "ok", "message": message}

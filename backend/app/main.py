@@ -24,7 +24,10 @@ from app.core.topology import build_network_graph, PoleInfo, DTInfo
 from app.core.localization import LocalizationEngine
 from app.core.ticket_manager import TicketManager
 from app.core.simulator import FaultSimulator
-from app.api import telemetry, tickets, simulator, events, ai, analytics, data_loader, outages
+from app.api import (
+    telemetry, tickets, simulator, events, ai, analytics,
+    data_loader, outages, auth, audit, crews, health
+)
 from app.api.events import broadcast_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -105,6 +108,79 @@ async def seed_database():
 
     logger.info(f"Seeded: {len(net.substations)} substations, {len(net.feeders)} feeders, "
                 f"{len(net.transformers)} DTs, {len(net.poles)} poles")
+
+
+async def seed_users_and_crews():
+    """Seed initial development users and field crews if empty."""
+    import os
+    from app.core.auth import hash_password
+    from app.models.schemas import User, Crew
+
+    async with async_session() as session:
+        user_count = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
+        if user_count == 0:
+            admin_pwd = os.getenv("DEV_ADMIN_PASSWORD", "admin123")
+            dev_users = [
+                User(
+                    user_id="USR-ADMIN-01",
+                    email="admin@gridops.ai",
+                    hashed_password=hash_password(admin_pwd),
+                    name="System Administrator",
+                    role="ADMIN",
+                    is_active=True,
+                ),
+                User(
+                    user_id="USR-OPERATOR-01",
+                    email="operator@gridops.ai",
+                    hashed_password=hash_password("operator123"),
+                    name="Control Room Operator",
+                    role="OPERATOR",
+                    is_active=True,
+                ),
+                User(
+                    user_id="USR-CREW-01",
+                    email="crew@gridops.ai",
+                    hashed_password=hash_password("crew123"),
+                    name="Rajesh Kumar (Field Lead)",
+                    role="FIELD_CREW",
+                    is_active=True,
+                ),
+            ]
+            session.add_all(dev_users)
+            logger.info("Seeded initial dev users: admin@gridops.ai, operator@gridops.ai, crew@gridops.ai")
+
+        crew_count = (await session.execute(select(func.count()).select_from(Crew))).scalar() or 0
+        if crew_count == 0:
+            default_crews = [
+                Crew(
+                    crew_id="CREW-01",
+                    name="North Line Maintenance Alpha",
+                    lead_name="Rajesh Kumar",
+                    contact="+91 98450 12345",
+                    status="available",
+                    base_station="Substation 01 Depot",
+                ),
+                Crew(
+                    crew_id="CREW-02",
+                    name="South Rapid Response Bravo",
+                    lead_name="Anita Sharma",
+                    contact="+91 98450 67890",
+                    status="available",
+                    base_station="Sector 4 Service Center",
+                ),
+                Crew(
+                    crew_id="CREW-03",
+                    name="Central Transformer Squad",
+                    lead_name="Vikram Singh",
+                    contact="+91 98450 54321",
+                    status="available",
+                    base_station="Central DISCOM Yard",
+                ),
+            ]
+            session.add_all(default_crews)
+            logger.info("Seeded default maintenance crews: CREW-01, CREW-02, CREW-03")
+
+        await session.commit()
 
 
 async def initialize_engine():
@@ -225,6 +301,7 @@ async def lifespan(app: FastAPI):
 
     # Seed if empty
     await seed_database()
+    await seed_users_and_crews()
 
     # Initialize localization engine
     loc_engine = await initialize_engine()
@@ -282,6 +359,10 @@ app.include_router(ai.router)
 app.include_router(analytics.router)
 app.include_router(data_loader.router)
 app.include_router(outages.router)
+app.include_router(auth.router)
+app.include_router(audit.router)
+app.include_router(crews.router)
+app.include_router(health.router)
 
 
 @app.get("/api/health")

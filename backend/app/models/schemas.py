@@ -162,8 +162,12 @@ class Ticket(Base):
 
     # Notes
     operator_notes = Column(Text)
+    assigned_crew_id = Column(Text, ForeignKey("crews.crew_id"), nullable=True)
+    field_notes = Column(Text, nullable=True)
 
     affected_poles = relationship("TicketAffectedPole", back_populates="ticket")
+    crew = relationship("Crew", back_populates="tickets")
+    transitions = relationship("TicketTransitionHistory", back_populates="ticket")
 
     __table_args__ = (
         Index("idx_tickets_status", "status"),
@@ -198,3 +202,65 @@ class ScheduledOutage(Base):
     __table_args__ = (
         Index("idx_scheduled_outages_active", "target_id", "scheduled_start", "grace_end"),
     )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id = Column(Text, primary_key=True)
+    email = Column(Text, unique=True, nullable=False, index=True)
+    hashed_password = Column(Text, nullable=False)
+    name = Column(Text, nullable=False)
+    role = Column(Text, nullable=False, default="OPERATOR")  # ADMIN, OPERATOR, FIELD_CREW
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class Crew(Base):
+    __tablename__ = "crews"
+
+    crew_id = Column(Text, primary_key=True)  # e.g., "CREW-01"
+    name = Column(Text, nullable=False)
+    lead_name = Column(Text, nullable=False)
+    contact = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="available")  # available, dispatched, off_duty
+    base_station = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    tickets = relationship("Ticket", back_populates="crew")
+
+
+class TicketTransitionHistory(Base):
+    __tablename__ = "ticket_transition_history"
+
+    id = Column(Integer().with_variant(BigInteger, "postgresql"), primary_key=True, autoincrement=True)
+    ticket_id = Column(Integer().with_variant(BigInteger, "postgresql"), ForeignKey("tickets.ticket_id"), nullable=False)
+    display_id = Column(Text, nullable=False)
+    from_status = Column(Text, nullable=False)
+    to_status = Column(Text, nullable=False)
+    user_id = Column(Text, nullable=True)
+    user_name = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    ticket = relationship("Ticket", back_populates="transitions")
+
+    __table_args__ = (
+        Index("idx_transition_history_ticket", "ticket_id"),
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer().with_variant(BigInteger, "postgresql"), primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    user_id = Column(Text, nullable=True)
+    user_email = Column(Text, nullable=True)
+    user_role = Column(Text, nullable=True)
+    action = Column(Text, nullable=False)  # LOGIN, FAILED_LOGIN, CSV_UPLOAD, CSV_IMPORT, NETWORK_REBUILD, TICKET_TRANSITION, CREW_ASSIGNED, etc.
+    entity_type = Column(Text, nullable=True)
+    entity_id = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
+    ip_address = Column(Text, nullable=True)
+

@@ -7,7 +7,7 @@ const TRANSITIONS = {
   verified: { next: 'closed', label: 'Close Ticket', icon: '📁' },
 }
 
-function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
+function TicketDetail({ ticket, onClose, onTransition, onExplain, onInvestigate }) {
   const [explanation, setExplanation] = useState(null)
   const [explaining, setExplaining] = useState(false)
   const [transitioning, setTransitioning] = useState(false)
@@ -203,8 +203,39 @@ function TicketDetail({ ticket, onClose, onTransition, onExplain }) {
         <div className="detail-row"><span className="label">Closed</span><span className="value">{formatTimestamp(ticket.closed_at)}</span></div>
       </div>
 
+      {/* Assigned Crew & Notes */}
+      {(ticket.assigned_crew_id || ticket.field_notes) && (
+        <div className="detail-section">
+          <h3>👷 Crew & Dispatch</h3>
+          {ticket.assigned_crew_id && (
+            <div className="detail-row">
+              <span className="label">Assigned Crew</span>
+              <span className="value font-bold" style={{ color: '#38bdf8' }}>{ticket.assigned_crew_id}</span>
+            </div>
+          )}
+          {ticket.field_notes && (
+            <div className="detail-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+              <span className="label">Field Notes</span>
+              <span className="value" style={{ fontSize: 11, fontStyle: 'italic', background: 'rgba(255,255,255,0.04)', padding: '6px 8px', borderRadius: 4, width: '100%' }}>
+                "{ticket.field_notes}"
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Actions */}
       <div className="action-buttons">
+        {onInvestigate && (
+          <button
+            className="btn btn-secondary"
+            style={{ width: '100%', marginBottom: 6, borderColor: 'var(--accent-primary)', color: 'var(--accent-primary)' }}
+            onClick={onInvestigate}
+          >
+            🔎 Deep Investigation & Evidence
+          </button>
+        )}
+
         {transition && (
           <button
             className="btn btn-primary"

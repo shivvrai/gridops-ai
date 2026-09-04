@@ -494,7 +494,11 @@ function solveFault(nodes, edges) {
    COMPONENT
    ================================================================ */
 
-export default function NetworkCanvas({ poles, dts, edges: initialEdges, tickets, selectedTicket, onInjectFault, onRepairSingle, onRepairAll }) {
+export default function NetworkCanvas({
+  poles, dts, edges: initialEdges, tickets, selectedTicket,
+  onInjectFault, onRepairSingle, onRepairAll,
+  layers, filters, mapPreviewData,
+}) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const animRef = useRef(null)
@@ -523,7 +527,11 @@ export default function NetworkCanvas({ poles, dts, edges: initialEdges, tickets
 
   // Master ref — read by animation loop & handlers without stale closures
   const S = useRef({})
-  S.current = { mode, nodes, edges, transform, selected, selectedSet, wireStart, mouseWorld, boundaries, counters, dragging, panStart, lasso, faultIds, highlightNodes, highlightEdges }
+  S.current = {
+    mode, nodes, edges, transform, selected, selectedSet, wireStart,
+    mouseWorld, boundaries, counters, dragging, panStart, lasso, faultIds,
+    highlightNodes, highlightEdges, layers, filters, mapPreviewData,
+  }
 
   /* ---- Canvas sizing ---- */
   useEffect(() => {

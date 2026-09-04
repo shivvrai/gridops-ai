@@ -1,0 +1,3 @@
+outage_id,scope,target_id,scheduled_start,scheduled_end,reason
+SO-2026-07-29-014,feeder,F-07-03,2026-07-29T10:00:00Z,2026-07-29T12:30:00Z,Planned maintenance - jumper replacement
+SO-2026-07-29-021,dt,D-0112,2026-07-29T14:00:00Z,2026-07-29T15:00:00Z,Load shedding

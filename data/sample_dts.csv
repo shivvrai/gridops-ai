@@ -1,0 +1,4 @@
+dt_id,feeder_id,lat,lon,capacity_kva,households_served,has_surveyed_topology
+D-0112,F-07-03,12.967801,77.595120,250,318,true
+D-0113,F-07-03,12.968500,77.596000,100,145,false
+D-0114,F-07-03,12.969100,77.597200,160,210,false

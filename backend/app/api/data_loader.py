@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
 
+from fastapi.responses import Response
 from app.models.database import get_db
-from app.models.schemas import Pole, DistributionTransformer
+from app.models.schemas import Pole, DistributionTransformer, Feeder, Substation
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +78,40 @@ def _validate_csv_rows(rows: list[dict], required_cols: set, entity: str) -> dic
     }
 
 
+@router.get("/template/poles")
+async def download_poles_template():
+    """Return a sample CSV template for poles registry."""
+    csv_content = (
+        "pole_id,lat,lon,feeder_id,dt_id,seq_on_line,parent_pole_id,pole_type,ward,pincode,device_id\n"
+        "P-024431,12.968214,77.594612,F-07-03,D-0112,1,D-0112,LT-9m-PCC,W-084,560078,KSPDB-SD07-D0112-4431\n"
+        "P-024432,12.968901,77.594330,F-07-03,D-0112,2,P-024431,LT-9m-PCC,W-084,560078,KSPDB-SD07-D0112-4432\n"
+        "P-024433,12.969455,77.593980,F-07-03,D-0112,,,LT-8m-Steel,W-084,560078,\n"
+    )
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=poles_template.csv"}
+    )
+
+
+@router.get("/template/dts")
+async def download_dts_template():
+    """Return a sample CSV template for distribution transformers registry."""
+    csv_content = (
+        "dt_id,feeder_id,lat,lon,capacity_kva,households_served,has_surveyed_topology\n"
+        "D-0112,F-07-03,12.967801,77.595120,250,318,true\n"
+        "D-0113,F-07-03,12.968500,77.596000,100,145,false\n"
+    )
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=dts_template.csv"}
+    )
+
+
 @router.post("/upload/poles")
 async def upload_poles_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
-    """Upload a pole registry CSV file. Validates and reports data quality."""
+    """Upload a pole registry CSV file. Validates, upserts to DB, and reports data quality."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a .csv")
 
@@ -105,22 +137,82 @@ async def upload_poles_csv(file: UploadFile = File(...), db: AsyncSession = Depe
         )
 
     report = _validate_csv_rows(rows, POLE_REQUIRED, "pole")
+    valid_data = report.pop("data")
 
-    # Don't auto-insert — just validate and report
-    # User must call /api/data/reload to actually rebuild
-    del report["data"]
+    # Upsert valid poles into database
+    if valid_data:
+        for r in valid_data:
+            pole_id = r["pole_id"].strip()
+            feeder_id = r["feeder_id"].strip()
+            dt_id = r["dt_id"].strip()
+
+            # Ensure feeder exists
+            feeder = await db.get(Feeder, feeder_id)
+            if not feeder:
+                sub = await db.execute(select(Substation).limit(1))
+                sub_obj = sub.scalars().first()
+                sub_id = sub_obj.substation_id if sub_obj else "SUB-01"
+                if not sub_obj:
+                    db.add(Substation(substation_id=sub_id, lat=float(r["lat"]), lon=float(r["lon"])))
+                    await db.flush()
+                db.add(Feeder(feeder_id=feeder_id, substation_id=sub_id))
+                await db.flush()
+
+            # Ensure DT exists
+            dt = await db.get(DistributionTransformer, dt_id)
+            if not dt:
+                db.add(DistributionTransformer(
+                    dt_id=dt_id, feeder_id=feeder_id,
+                    lat=float(r["lat"]), lon=float(r["lon"]),
+                    has_surveyed_topology=bool(r.get("parent_pole_id", "").strip())
+                ))
+                await db.flush()
+
+            parent_id = r.get("parent_pole_id", "").strip() or None
+            seq_val = int(r["seq_on_line"]) if r.get("seq_on_line", "").strip().isdigit() else None
+            pole = await db.get(Pole, pole_id)
+            if pole:
+                pole.lat = float(r["lat"])
+                pole.lon = float(r["lon"])
+                pole.feeder_id = feeder_id
+                pole.dt_id = dt_id
+                pole.parent_pole_id = parent_id
+                pole.seq_on_line = seq_val
+                pole.device_id = r.get("device_id", "").strip() or None
+                pole.pincode = r.get("pincode", "").strip() or None
+                pole.ward = r.get("ward", "").strip() or None
+                pole.pole_type = r.get("pole_type", "").strip() or "LT-9m-PCC"
+                pole.topology_source = "surveyed" if parent_id else "unknown"
+            else:
+                pole = Pole(
+                    pole_id=pole_id,
+                    lat=float(r["lat"]),
+                    lon=float(r["lon"]),
+                    feeder_id=feeder_id,
+                    dt_id=dt_id,
+                    parent_pole_id=parent_id,
+                    seq_on_line=seq_val,
+                    device_id=r.get("device_id", "").strip() or None,
+                    pincode=r.get("pincode", "").strip() or None,
+                    ward=r.get("ward", "").strip() or None,
+                    pole_type=r.get("pole_type", "").strip() or "LT-9m-PCC",
+                    topology_source="surveyed" if parent_id else "unknown",
+                )
+                db.add(pole)
+        await db.commit()
 
     return {
         "status": "validated",
         "filename": file.filename,
+        "saved_to_db": len(valid_data),
         **report,
-        "next_step": "Call POST /api/data/reload to rebuild network topology from uploaded data",
+        "next_step": "Click 'Reload Network' to rebuild topology graph from new data",
     }
 
 
 @router.post("/upload/dts")
 async def upload_dts_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
-    """Upload a DT registry CSV file. Validates and reports data quality."""
+    """Upload a DT registry CSV file. Validates, upserts to DB, and reports data quality."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a .csv")
 
@@ -145,12 +237,60 @@ async def upload_dts_csv(file: UploadFile = File(...), db: AsyncSession = Depend
         )
 
     report = _validate_csv_rows(rows, DT_REQUIRED, "dt")
-    del report["data"]
+    valid_data = report.pop("data")
+
+    # Upsert valid DTs into database
+    if valid_data:
+        for r in valid_data:
+            dt_id = r["dt_id"].strip()
+            feeder_id = r["feeder_id"].strip()
+
+            # Ensure feeder exists
+            feeder = await db.get(Feeder, feeder_id)
+            if not feeder:
+                sub = await db.execute(select(Substation).limit(1))
+                sub_obj = sub.scalars().first()
+                sub_id = sub_obj.substation_id if sub_obj else "SUB-01"
+                if not sub_obj:
+                    db.add(Substation(substation_id=sub_id, lat=float(r["lat"]), lon=float(r["lon"])))
+                    await db.flush()
+                db.add(Feeder(feeder_id=feeder_id, substation_id=sub_id))
+                await db.flush()
+
+            dt = await db.get(DistributionTransformer, dt_id)
+            cap = int(r["capacity_kva"]) if r.get("capacity_kva", "").strip().isdigit() else None
+            hh = int(r["households_served"]) if r.get("households_served", "").strip().isdigit() else None
+            has_surveyed = r.get("has_surveyed_topology", "").strip().lower() in ("true", "1", "yes")
+
+            if dt:
+                dt.feeder_id = feeder_id
+                dt.lat = float(r["lat"])
+                dt.lon = float(r["lon"])
+                if cap is not None:
+                    dt.capacity_kva = cap
+                if hh is not None:
+                    dt.households_served = hh
+                if r.get("has_surveyed_topology", "").strip():
+                    dt.has_surveyed_topology = has_surveyed
+            else:
+                dt = DistributionTransformer(
+                    dt_id=dt_id,
+                    feeder_id=feeder_id,
+                    lat=float(r["lat"]),
+                    lon=float(r["lon"]),
+                    capacity_kva=cap,
+                    households_served=hh,
+                    has_surveyed_topology=has_surveyed,
+                )
+                db.add(dt)
+        await db.commit()
 
     return {
         "status": "validated",
         "filename": file.filename,
+        "saved_to_db": len(valid_data),
         **report,
+        "next_step": "Click 'Reload Network' to rebuild topology graph from new data",
     }
 
 

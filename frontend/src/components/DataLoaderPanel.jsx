@@ -118,14 +118,35 @@ function DataLoaderPanel({ apiUrl }) {
       <div className="dash-card">
         <div className="dash-card-header">
           <span className="dash-card-icon">📁</span>
-          <span className="dash-card-title">Upload Registry CSV</span>
+          <span className="dash-card-title">Upload & Template Registry CSV</span>
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-          Upload your ESCOM's pole or DT registry CSV to replace demo data.
-          The system validates data quality before loading.
+          Upload your DISCOM/ESCOM pole or DT registry CSV to populate real infrastructure.
+          The system validates data quality and automatically updates the database.
         </div>
 
-        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        {/* Template Downloads */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <a
+            href={`${apiUrl}/api/data/template/poles`}
+            download="poles_template.csv"
+            className="btn btn-secondary btn-sm"
+            style={{ flex: 1, textAlign: 'center', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            📥 Download Poles Template
+          </a>
+          <a
+            href={`${apiUrl}/api/data/template/dts`}
+            download="dts_template.csv"
+            className="btn btn-secondary btn-sm"
+            style={{ flex: 1, textAlign: 'center', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            📥 Download DTs Template
+          </a>
+        </div>
+
+        {/* Upload Buttons */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
           <button
             className="btn btn-primary btn-sm"
             onClick={() => handleUpload('poles')}
@@ -144,11 +165,25 @@ function DataLoaderPanel({ apiUrl }) {
           </button>
         </div>
 
-        <div style={{ fontSize: 10, color: 'var(--text-muted)', padding: '4px 0' }}>
-          <strong>Pole CSV columns:</strong> pole_id, lat, lon, feeder_id, dt_id, parent_pole_id (optional), device_id (optional), pincode (optional)
+        {/* Column Reference Specs */}
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: 6, padding: '8px 10px', marginTop: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+            📍 Poles CSV Data Columns:
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            <span style={{ color: '#ef4444', fontWeight: 600 }}>Required:</span> <code>pole_id</code>, <code>lat</code>, <code>lon</code>, <code>feeder_id</code>, <code>dt_id</code><br />
+            <span style={{ color: '#10b981', fontWeight: 600 }}>Optional:</span> <code>parent_pole_id</code> (for surveyed order), <code>seq_on_line</code> (1, 2, 3...), <code>device_id</code> (IoT sensor ID), <code>ward</code>, <code>pincode</code>, <code>pole_type</code> (e.g. LT-9m-PCC)
+          </div>
         </div>
-        <div style={{ fontSize: 10, color: 'var(--text-muted)', padding: '4px 0' }}>
-          <strong>DT CSV columns:</strong> dt_id, feeder_id, lat, lon, capacity_kva (optional), households_served (optional)
+
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: 6, padding: '8px 10px', marginTop: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+            ⚡ DT (Transformers) CSV Data Columns:
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            <span style={{ color: '#ef4444', fontWeight: 600 }}>Required:</span> <code>dt_id</code>, <code>feeder_id</code>, <code>lat</code>, <code>lon</code><br />
+            <span style={{ color: '#10b981', fontWeight: 600 }}>Optional:</span> <code>capacity_kva</code> (e.g. 250), <code>households_served</code> (e.g. 318), <code>has_surveyed_topology</code> (true/false)
+          </div>
         </div>
       </div>
 
@@ -191,6 +226,16 @@ function DataLoaderPanel({ apiUrl }) {
                   <div>📄 File: {uploadResult.filename}</div>
                   <div>✅ Valid rows: {uploadResult.valid_rows}</div>
                   <div>❌ Invalid rows: {uploadResult.invalid_rows}</div>
+                  {uploadResult.saved_to_db > 0 && (
+                    <div style={{ color: '#10b981', fontWeight: 600, marginTop: 4 }}>
+                      💾 Saved {uploadResult.saved_to_db} records to database
+                    </div>
+                  )}
+                  {uploadResult.next_step && (
+                    <div style={{ color: 'var(--text-primary)', marginTop: 4, fontWeight: 500 }}>
+                      👉 {uploadResult.next_step}
+                    </div>
+                  )}
                   {uploadResult.warnings?.map((w, i) => (
                     <div key={i} style={{ color: '#f59e0b', marginTop: 2 }}>⚠️ {w}</div>
                   ))}

@@ -99,6 +99,76 @@ function SimulatorPanel({ networkInfo, apiUrl, onEvent, onRefresh }) {
   return (
     <div className="simulator-panel">
 
+      {/* ── Quick Default Grid Failure Scenarios ── */}
+      <div className="sim-section" style={{ background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.08), rgba(59, 130, 246, 0.08))', border: '1px solid rgba(168, 85, 247, 0.3)', borderRadius: 8, padding: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+          <span style={{ fontSize: 16 }}>🧪</span>
+          <h3 style={{ margin: 0, fontSize: 13, color: '#c084fc' }}>Default Grid Failure Scenarios</h3>
+        </div>
+        <p style={{ margin: '0 0 10px', fontSize: 11, color: 'var(--text-secondary)' }}>
+          Inject standard real-world power grid failure modes with 1 click:
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            style={{ textAlign: 'left', padding: '6px 8px', borderColor: 'rgba(245, 158, 11, 0.4)', color: '#fbbf24' }}
+            disabled={loading || allDTs.length === 0}
+            onClick={() => {
+              const dt = allDTs[0]?.dt_id || 'DT-01'
+              doAction('/api/simulator/fault/span', { dt_id: dt })
+            }}
+          >
+            🌲 Tree Fall Broken Span
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            style={{ textAlign: 'left', padding: '6px 8px', borderColor: 'rgba(239, 68, 68, 0.4)', color: '#ef4444' }}
+            disabled={loading || allDTs.length === 0}
+            onClick={() => {
+              const dt = allDTs[1]?.dt_id || allDTs[0]?.dt_id || 'DT-01'
+              doAction('/api/simulator/fault/dt', { dt_id: dt })
+            }}
+          >
+            ⚡ DT Transformer Blowout
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            style={{ textAlign: 'left', padding: '6px 8px', borderColor: 'rgba(168, 85, 247, 0.4)', color: '#c084fc' }}
+            disabled={loading || allFeeders.length === 0}
+            onClick={() => {
+              const f = allFeeders[0]?.feeder_id || 'F-01'
+              doAction('/api/simulator/fault/feeder', { feeder_id: f })
+            }}
+          >
+            🔴 Feeder Breaker Trip
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            style={{ textAlign: 'left', padding: '6px 8px', borderColor: 'rgba(107, 114, 128, 0.4)', color: '#9ca3af' }}
+            disabled={loading}
+            onClick={() => {
+              doAction('/api/simulator/device/death', { pole_id: 'P-000010' })
+            }}
+          >
+            💀 Dead Sensor Anomaly
+          </button>
+        </div>
+
+        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-muted)' }}>
+          💡 Tip: Click <strong>"🧪 Try Scenarios & Solver"</strong> on the map canvas toolbar to step through the BFS/DFS algorithm visualizer live!
+        </div>
+      </div>
+
+      <div style={{ height: 1, background: 'var(--border-subtle)', margin: '12px 0' }} />
+
       {/* ── Manual Pole Repair ── */}
       <div className="sim-section">
         <div

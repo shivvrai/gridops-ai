@@ -566,7 +566,7 @@ class LocalizationEngine:
             label = "HIGH"
         elif boundary.is_range or boundary.uninstrumented_count > 0:
             label = "LOW"
-        elif factors.get("fw_version", "").startswith("1.2"):
+        elif (factors.get("fw_version") or "").startswith("1.2"):
             label = "LOW"
         elif is_surveyed or (not is_surveyed and boundary.topology_confidence == "HIGH"):
             label = "MEDIUM"

@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
+import ScenarioLabVisualizer from './ScenarioLabVisualizer'
 
 /* ================================================================
    CONSTANTS
@@ -115,22 +116,37 @@ function drawGrid(ctx, w, h, t) {
   ctx.stroke()
 }
 
-function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel) {
+function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel, highlightColor, showFaultMarker = true) {
   if (!a || !b) return
   const st = COLORS.edge[e.type] || COLORS.edge.span
   const isFault = e.status === 'fault'
 
-  // Multi-select highlight
+  // Step Highlight Aura
+  if (highlightColor) {
+    ctx.save()
+    ctx.shadowColor = highlightColor
+    ctx.shadowBlur = 12 + Math.sin(time * 0.08) * 4
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
+    ctx.strokeStyle = highlightColor
+    ctx.lineWidth = st.w + 4
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // Multi-select glow
   if (isMultiSel) {
     ctx.save()
+    ctx.shadowColor = COLORS.multiSelect
+    ctx.shadowBlur = 10
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
-    ctx.strokeStyle = COLORS.multiSelect; ctx.lineWidth = st.w + 6
-    ctx.globalAlpha = 0.25; ctx.stroke()
+    ctx.strokeStyle = COLORS.multiSelect
+    ctx.lineWidth = st.w + 4
+    ctx.stroke()
     ctx.restore()
   }
 
   // Glow layer for fault
-  if (isFault) {
+  if (isFault && showFaultMarker) {
     ctx.save()
     ctx.shadowColor = COLORS.faultGlow
     ctx.shadowBlur = 14 + Math.sin(time * 0.05) * 5
@@ -141,14 +157,14 @@ function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel) {
 
   // Main line
   ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
-  ctx.strokeStyle = isFault ? COLORS.fault : st.c
+  ctx.strokeStyle = (isFault && showFaultMarker) ? COLORS.fault : st.c
   ctx.lineWidth = st.w
   if (e.type === 'service_drop') ctx.setLineDash([5, 4])
   ctx.stroke()
   ctx.setLineDash([])
 
   // Fault X marker
-  if (isFault) {
+  if (isFault && showFaultMarker) {
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
     const sz = 9 + Math.sin(time * 0.08) * 2
     ctx.save()
@@ -177,9 +193,20 @@ function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel) {
   }
 }
 
-function drawNode(ctx, n, isSel, isMultiSel, isBound, time) {
+function drawNode(ctx, n, isSel, isMultiSel, isBound, time, highlightColor, showFaultBadge = true) {
   const { x, y, type, status } = n
   const sz = SIZES[type]
+
+  // Algorithm Step Highlight Aura
+  if (highlightColor) {
+    ctx.save()
+    ctx.shadowColor = highlightColor
+    ctx.shadowBlur = 18 + Math.sin(time * 0.08) * 6
+    ctx.beginPath(); ctx.arc(x, y, sz + 12, 0, Math.PI * 2)
+    ctx.strokeStyle = highlightColor; ctx.lineWidth = 3
+    ctx.stroke()
+    ctx.restore()
+  }
 
   // Multi-select ring
   if (isMultiSel) {
@@ -211,7 +238,7 @@ function drawNode(ctx, n, isSel, isMultiSel, isBound, time) {
   }
 
   // Faulted pole/node visual indicator
-  if (n.isFault) {
+  if (n.isFault && showFaultBadge) {
     ctx.save()
     ctx.shadowColor = 'rgba(239, 68, 68, 0.85)'
     ctx.shadowBlur = 16 + Math.sin(time * 0.08) * 6
@@ -460,32 +487,66 @@ function rederiveStatuses(nodes, edges) {
 
   return nodes.map(n => ({
     ...n,
-    status: n.isFault ? 'confirmed_dark' : (live.has(n.id) ? 'live' : (Math.random() < 0.3 ? 'unknown' : 'dark')),
+    status: n.isFault ? 'confirmed_dark' : (n.status === 'suspected_dark' && live.has(n.id) ? 'suspected_dark' : (live.has(n.id) ? 'live' : 'dark')),
   }))
 }
 
 function solveFault(nodes, edges) {
-  const children = {}
-  nodes.forEach(n => { children[n.id] = [] })
-  edges.forEach(e => { if (children[e.from]) children[e.from].push({ nid: e.to, eid: e.id }) })
-
-  const ss = nodes.find(n => n.type === 'substation')
+  const ss = nodes.find(n => n.type === 'substation') || nodes[0]
   if (!ss) return []
 
+  const nodeMap = {}
+  nodes.forEach(n => { nodeMap[n.id] = n })
+
+  // 1. Undirected adjacency
+  const adj = {}
+  nodes.forEach(n => { adj[n.id] = [] })
+  edges.forEach(e => {
+    if (adj[e.from]) adj[e.from].push({ nid: e.to, eid: e.id, edge: e })
+    if (adj[e.to]) adj[e.to].push({ nid: e.from, eid: e.id, edge: e })
+  })
+
+  // 2. BFS from Substation to orient tree strictly downstream
+  const treeVisited = new Set([ss.id])
+  const children = {}
+  nodes.forEach(n => { children[n.id] = [] })
+  const q = [ss.id]
+  while (q.length) {
+    const cur = q.shift()
+    for (const nb of (adj[cur] || [])) {
+      if (!treeVisited.has(nb.nid)) {
+        treeVisited.add(nb.nid)
+        children[cur].push({ nid: nb.nid, eid: nb.eid, edge: nb.edge })
+        q.push(nb.nid)
+      }
+    }
+  }
+
+  // 3. DFS to detect live -> dark transition edge
   const bounds = []
   const dfs = (id) => {
-    const node = nodes.find(n => n.id === id)
+    const node = nodeMap[id]
     if (!node) return
     for (const ch of (children[id] || [])) {
-      const cn = nodes.find(n => n.id === ch.nid)
+      const cn = nodeMap[ch.nid]
       if (!cn) continue
-      if (node.status === 'live' && cn.status !== 'live') {
-        bounds.push({ live: id, dark: ch.nid, edge: ch.eid, isNodeFault: !!cn.isFault })
-      } else {
+      const isFaultEdge = ch.edge && ch.edge.status === 'fault'
+      const isChildDark = cn.status !== 'live' || cn.isFault
+
+      if (node.status === 'live' && (isChildDark || isFaultEdge)) {
+        bounds.push({
+          live: id,
+          dark: ch.nid,
+          edge: ch.eid,
+          isNodeFault: !!cn.isFault,
+          isEdgeFault: isFaultEdge,
+        })
+      } else if (cn.status === 'live' && !isFaultEdge) {
         dfs(ch.nid)
       }
     }
   }
+
   dfs(ss.id)
   return bounds
 }
@@ -524,6 +585,8 @@ export default function NetworkCanvas({
   const [currentStep, setCurrentStep] = useState(-1)
   const [highlightNodes, setHighlightNodes] = useState(new Set())
   const [highlightEdges, setHighlightEdges] = useState(new Set())
+  const [showScenarioLab, setShowScenarioLab] = useState(false)
+  const [activeStepData, setActiveStepData] = useState(null)
 
   // Master ref — read by animation loop & handlers without stale closures
   const S = useRef({})
@@ -531,6 +594,7 @@ export default function NetworkCanvas({
     mode, nodes, edges, transform, selected, selectedSet, wireStart,
     mouseWorld, boundaries, counters, dragging, panStart, lasso, faultIds,
     highlightNodes, highlightEdges, layers, filters, mapPreviewData,
+    showScenarioLab, activeStepData,
   }
 
   /* ---- Canvas sizing ---- */
@@ -743,10 +807,11 @@ export default function NetworkCanvas({
   /* ---- Sync pole statuses from backend ---- */
   useEffect(() => {
     if (!poles.length) return
+    if (showScenarioLab) return // Preserve active simulated scenario states during Try-On Lab mode
     const m = {}
     poles.forEach(p => { m[`bp-${p.pole_id}`] = { status: p.status || 'live', isFault: p.status === 'fault' } })
     setNodes(prev => prev.map(n => m[n.id] !== undefined ? { ...n, status: m[n.id].status, isFault: m[n.id].isFault } : n))
-  }, [poles])
+  }, [poles, showScenarioLab])
 
   /* ---- Animation loop ---- */
   useEffect(() => {
@@ -774,8 +839,15 @@ export default function NetworkCanvas({
       const flow = time * 0.5
 
       s.edges.forEach(e => {
+        if (s.layers) {
+          if (s.layers.topology === false) return
+          if (e.type === 'feeder' && s.layers.feeders === false) return
+          if (e.status === 'fault' && s.layers.faults === false) return
+        }
         const isHighlight = s.highlightEdges && s.highlightEdges.has(e.id)
-        drawEdgeLine(ctx, e, nm[e.from], nm[e.to], flow, time, s.selectedSet.has(e.id) || isHighlight)
+        const hlColor = isHighlight ? (s.activeStepData?.accentColor || '#38bdf8') : null
+        const showFaultDetails = !s.showScenarioLab || (s.activeStepData?.step >= 4)
+        drawEdgeLine(ctx, e, nm[e.from], nm[e.to], flow, time, s.selectedSet.has(e.id), hlColor, showFaultDetails)
       })
 
       // Wire preview
@@ -792,14 +864,273 @@ export default function NetworkCanvas({
       // Lasso rectangle
       drawLasso(ctx, s.lasso, s.transform)
 
+      const showFaultDetails = !s.showScenarioLab || (s.activeStepData?.step >= 4)
       const bIds = new Set()
-      s.boundaries.forEach(b => { bIds.add(b.live); bIds.add(b.dark) })
+      if (showFaultDetails) {
+        s.boundaries.forEach(b => { bIds.add(b.live); bIds.add(b.dark) })
+      }
       s.nodes.forEach(n => {
+        if (s.layers) {
+          if (n.type === 'pole' && s.layers.poles === false) return
+          if (n.type === 'dt' && s.layers.transformers === false) return
+          if (n.type === 'substation' && s.layers.transformers === false) return
+          if (n.isFault && s.layers.faults === false) return
+        }
+        if (s.filters) {
+          if (s.filters.feeder && n.meta?.feeder_id && n.meta.feeder_id !== s.filters.feeder) return
+          if (s.filters.dt && n.meta?.dt_id && n.meta.dt_id !== s.filters.dt) return
+          if (s.filters.poleStatus && n.type === 'pole' && n.status !== s.filters.poleStatus) return
+        }
         const isStudyHighlight = s.highlightNodes && s.highlightNodes.has(n.id)
-        drawNode(ctx, n, s.selected?.id === n.id, s.selectedSet.has(n.id) || isStudyHighlight, bIds.has(n.id), time)
+        const hlColor = isStudyHighlight ? (s.activeStepData?.accentColor || '#38bdf8') : null
+        drawNode(ctx, n, s.selected?.id === n.id, s.selectedSet.has(n.id), bIds.has(n.id), time, hlColor, showFaultDetails)
       })
 
-      ctx.restore(); ctx.restore()
+      // =========================================================================
+      // SCENARIO LAB & ALGORITHM VISUAL EFFECTS (IN WORLD COORDINATES)
+      // =========================================================================
+      // 1. Step 1: Substation Power Source Beacon
+      if (s.activeStepData?.step === 1) {
+        const ss = s.nodes.find(n => n.type === 'substation') || s.nodes[0]
+        if (ss) {
+          ctx.save()
+          for (let i = 0; i < 3; i++) {
+            const rad = 24 + ((time * 0.8 + i * 20) % 64)
+            const alpha = Math.max(0, 1 - rad / 64) * 0.85
+            ctx.strokeStyle = `rgba(168, 85, 247, ${alpha})`
+            ctx.lineWidth = 3
+            ctx.beginPath(); ctx.arc(ss.x, ss.y, rad, 0, Math.PI * 2); ctx.stroke()
+          }
+          // Source Callout Flag
+          ctx.fillStyle = 'rgba(17, 24, 39, 0.94)'
+          ctx.strokeStyle = '#a855f7'
+          ctx.lineWidth = 1.6
+          ctx.shadowColor = '#a855f7'
+          ctx.shadowBlur = 14
+          const flW = 210, flH = 26
+          if (ctx.roundRect) ctx.roundRect(ss.x - flW / 2, ss.y - 52, flW, flH, 6)
+          else ctx.rect(ss.x - flW / 2, ss.y - 52, flW, flH)
+          ctx.fill(); ctx.stroke()
+          ctx.fillStyle = '#c084fc'
+          ctx.font = 'bold 10px Inter, system-ui, sans-serif'
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText(`⚡ 11kV PRIMARY POWER ROOT (${ss.label || 'SS-01'})`, ss.x, ss.y - 39)
+          ctx.restore()
+        }
+      }
+
+      // 2. Step 2: BFS Wavefront Flow along live edges
+      if (s.activeStepData?.step === 2) {
+        s.edges.forEach(e => {
+          if (s.highlightEdges && s.highlightEdges.has(e.id)) {
+            const a = nm[e.from], b = nm[e.to]
+            if (a && b) {
+              const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy)
+              if (len > 15) {
+                const waveCount = Math.max(2, Math.floor(len / 35))
+                ctx.save()
+                for (let i = 0; i < waveCount; i++) {
+                  const t = ((time * 0.04 + i / waveCount) % 1 + 1) % 1
+                  const px = a.x + dx * t, py = a.y + dy * t
+                  ctx.fillStyle = '#4ade80'
+                  ctx.shadowColor = '#22c55e'
+                  ctx.shadowBlur = 10
+                  ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill()
+                }
+                ctx.restore()
+              }
+            }
+          }
+        })
+      }
+
+      // 3. Step 3: Dark Cluster Isolation & Spatial Corroboration Hull
+      if (s.activeStepData?.step === 3) {
+        const darkList = []
+        s.nodes.forEach(n => {
+          if (s.highlightNodes && s.highlightNodes.has(n.id)) {
+            darkList.push(n)
+            ctx.save()
+            const rad = (SIZES[n.type] || 7) + 12 + Math.sin(time * 0.12 + n.x) * 4
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.85)'
+            ctx.lineWidth = 2.5
+            ctx.shadowColor = '#ef4444'
+            ctx.shadowBlur = 14
+            ctx.beginPath(); ctx.arc(n.x, n.y, rad, 0, Math.PI * 2); ctx.stroke()
+            // 0V Badge
+            ctx.fillStyle = '#ef4444'
+            ctx.font = 'bold 8.5px Inter, system-ui, sans-serif'
+            ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
+            ctx.fillText('0V', n.x, n.y - (SIZES[n.type] || 7) - 4)
+            ctx.restore()
+          }
+        })
+
+        if (darkList.length > 0) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          darkList.forEach(n => {
+            if (n.x < minX) minX = n.x
+            if (n.y < minY) minY = n.y
+            if (n.x > maxX) maxX = n.x
+            if (n.y > maxY) maxY = n.y
+          })
+          const pad = 30
+          const bx = minX - pad, by = minY - pad, bw = Math.max(90, (maxX - minX) + pad * 2), bh = Math.max(60, (maxY - minY) + pad * 2)
+          ctx.save()
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)'
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.08)'
+          ctx.lineWidth = 2
+          ctx.setLineDash([8, 6])
+          ctx.lineDashOffset = -(time * 0.6) % 14
+          if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 12)
+          else ctx.rect(bx, by, bw, bh)
+          ctx.fill(); ctx.stroke()
+          ctx.setLineDash([])
+
+          // Floating Cluster Header Badge
+          const cx = bx + bw / 2, cy = by - 16
+          const isCorroborated = darkList.length >= 3
+          const cW = isCorroborated ? 290 : 260, cH = 24
+          ctx.fillStyle = 'rgba(17, 24, 39, 0.95)'
+          ctx.strokeStyle = isCorroborated ? '#ef4444' : '#f59e0b'
+          ctx.lineWidth = 1.4
+          if (ctx.roundRect) ctx.roundRect(cx - cW / 2, cy - cH / 2, cW, cH, 5)
+          else ctx.rect(cx - cW / 2, cy - cH / 2, cW, cH)
+          ctx.fill(); ctx.stroke()
+          ctx.fillStyle = isCorroborated ? '#fca5a5' : '#fde68a'
+          ctx.font = 'bold 9.5px Inter, system-ui, sans-serif'
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+          ctx.fillText(
+            isCorroborated
+              ? `🔴 DE-ENERGIZED ZONE: ${darkList.length} POLES • ✅ CORROBORATED`
+              : `🟡 ANOMALY: ${darkList.length} SENSOR DARK • 🛡️ SUPPRESSED (<3)`,
+            cx, cy
+          )
+          ctx.restore()
+        }
+      }
+
+      // 4. Step 4 & 5: Animated Fault Boundary Spans, Lasers, Upstream/Downstream Flags & Crew Dispatch
+      const shouldDrawBoundaries = (!s.showScenarioLab && s.boundaries && s.boundaries.length > 0) ||
+        (s.showScenarioLab && (s.activeStepData?.step === 4 || s.activeStepData?.step === 5) && s.boundaries && s.boundaries.length > 0)
+
+      if (shouldDrawBoundaries) {
+        s.boundaries.forEach(b => {
+          const a = nm[b.live], c = nm[b.dark]
+          if (a && c) {
+            const mx = (a.x + c.x) / 2, my = (a.y + c.y) / 2
+
+            // High-Energy Pulsing Fault Boundary Laser
+            ctx.save()
+            ctx.strokeStyle = '#f59e0b'
+            ctx.lineWidth = 5.5
+            ctx.shadowColor = '#fbbf24'
+            ctx.shadowBlur = 20 + Math.sin(time * 0.1) * 6
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y); ctx.stroke()
+
+            // Marching Dashed Core
+            ctx.strokeStyle = '#ffffff'
+            ctx.lineWidth = 2.2
+            ctx.setLineDash([8, 6])
+            ctx.lineDashOffset = -(time * 1.6) % 14
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y); ctx.stroke()
+            ctx.restore()
+
+            // Upstream LIVE Flag on node a
+            ctx.save()
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.94)'
+            ctx.strokeStyle = '#22c55e'
+            ctx.lineWidth = 1.3
+            const uW = 126, uH = 19
+            if (ctx.roundRect) ctx.roundRect(a.x - uW / 2, a.y - 32, uW, uH, 4)
+            else ctx.rect(a.x - uW / 2, a.y - 32, uW, uH)
+            ctx.fill(); ctx.stroke()
+            ctx.fillStyle = '#4ade80'
+            ctx.font = 'bold 8.5px Inter, system-ui, sans-serif'
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+            ctx.fillText(`🟢 UPSTREAM (LIVE: 11kV)`, a.x, a.y - 22)
+            ctx.restore()
+
+            // Downstream DARK Flag on node c
+            ctx.save()
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.94)'
+            ctx.strokeStyle = '#ef4444'
+            ctx.lineWidth = 1.3
+            const dW = 126, dH = 19
+            if (ctx.roundRect) ctx.roundRect(c.x - dW / 2, c.y - 32, dW, dH, 4)
+            else ctx.rect(c.x - dW / 2, c.y - 32, dW, dH)
+            ctx.fill(); ctx.stroke()
+            ctx.fillStyle = '#f87171'
+            ctx.font = 'bold 8.5px Inter, system-ui, sans-serif'
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+            ctx.fillText(`🔴 DOWNSTREAM (DARK: 0V)`, c.x, c.y - 22)
+            ctx.restore()
+
+            // Midpoint Rotating Crosshairs and Pulsing Rings
+            ctx.save()
+            ctx.strokeStyle = '#fbbf24'
+            ctx.lineWidth = 2.2
+            ctx.beginPath()
+            ctx.arc(mx, my, 18 + Math.sin(time * 0.1) * 3, 0, Math.PI * 2)
+            ctx.stroke()
+            // Rotating Crosshairs
+            ctx.translate(mx, my)
+            ctx.rotate(time * 0.025)
+            ctx.beginPath()
+            ctx.moveTo(-24, 0); ctx.lineTo(24, 0)
+            ctx.moveTo(0, -24); ctx.lineTo(0, 24)
+            ctx.stroke()
+            ctx.restore()
+
+            // Fault Boundary Identification Banner
+            ctx.save()
+            const bWidth = 194, bHeight = 22
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.94)'
+            ctx.strokeStyle = '#fbbf24'
+            ctx.lineWidth = 1.4
+            if (ctx.roundRect) ctx.roundRect(mx - bWidth / 2, my - 44, bWidth, bHeight, 4)
+            else ctx.rect(mx - bWidth / 2, my - 44, bWidth, bHeight)
+            ctx.fill(); ctx.stroke()
+            ctx.fillStyle = '#fbbf24'
+            ctx.font = 'bold 9.5px Inter, system-ui, sans-serif'
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+            ctx.fillText(`⚡ FAULT: ${a.label || 'LIVE'} ➔ ${c.label || 'DARK'}`, mx, my - 33)
+            ctx.restore()
+
+            // Step 5: Distance Ruler & Crew Dispatch Info
+            if (s.activeStepData?.step === 5) {
+              const dtNode = s.nodes.find(n => n.type === 'dt' && n.status === 'live') || nm['dt-01']
+              if (dtNode) {
+                ctx.save()
+                ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)'
+                ctx.lineWidth = 1.5
+                ctx.setLineDash([5, 4])
+                ctx.beginPath(); ctx.moveTo(dtNode.x, dtNode.y); ctx.lineTo(a.x, a.y); ctx.stroke()
+                ctx.restore()
+              }
+
+              ctx.save()
+              const rW = 230, rH = 24
+              ctx.fillStyle = 'rgba(15, 23, 42, 0.96)'
+              ctx.strokeStyle = '#38bdf8'
+              ctx.lineWidth = 1.4
+              ctx.shadowColor = '#38bdf8'
+              ctx.shadowBlur = 12
+              if (ctx.roundRect) ctx.roundRect(mx - rW / 2, my + 26, rW, rH, 5)
+              else ctx.rect(mx - rW / 2, my + 26, rW, rH)
+              ctx.fill(); ctx.stroke()
+              ctx.fillStyle = '#38bdf8'
+              ctx.font = 'bold 9px Inter, system-ui, sans-serif'
+              ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+              ctx.fillText('📏 ~43m SPAN • 👷 CREW #2 DISPATCHED (ETA 14m)', mx, my + 38)
+              ctx.restore()
+            }
+          }
+        })
+      }
+
+      ctx.restore() // End World coordinates
+      ctx.restore() // End Screen coordinates
       animRef.current = requestAnimationFrame(render)
     }
     animRef.current = requestAnimationFrame(render)
@@ -1022,6 +1353,20 @@ export default function NetworkCanvas({
     setTransform({ scale: ns, x: mx - (mx - s.x) * ratio, y: my - (my - s.y) * ratio })
   }, [])
 
+  const focusOnCoordinates = useCallback((wx, wy, customScale = 1.15) => {
+    const c = canvasRef.current
+    if (!c) return
+    const dpr = window.devicePixelRatio || 1
+    const w = c.width / dpr, h = c.height / dpr
+    const sc = customScale || 1.15
+    const targetYPos = showScenarioLab ? h * 0.45 : h * 0.5
+    setTransform({
+      scale: sc,
+      x: (w / 2) - wx * sc,
+      y: targetYPos - wy * sc,
+    })
+  }, [showScenarioLab])
+
   /* ---- Action handlers ---- */
   const handleRandom = () => {
     // Generate purely local fake random layout (will be overwritten by backend next tick)
@@ -1111,26 +1456,14 @@ export default function NetworkCanvas({
     })
 
     // Find boundaries
-    const bounds = []
+    const bounds = solveFault(nodes, edges)
     const boundaryNodes = new Set()
     const boundaryEdges = new Set()
-    const dfs = (id) => {
-      const node = nodes.find(n => n.id === id)
-      if (!node) return
-      for (const ch of (children[id] || [])) {
-        const cn = nodes.find(n => n.id === ch.nid)
-        if (!cn) continue
-        if (node.status === 'live' && cn.status !== 'live') {
-          bounds.push({ live: id, dark: ch.nid, edge: ch.eid, isNodeFault: !!cn.isFault })
-          boundaryNodes.add(id)
-          boundaryNodes.add(ch.nid)
-          boundaryEdges.add(ch.eid)
-        } else {
-          dfs(ch.nid)
-        }
-      }
-    }
-    dfs(ss.id)
+    bounds.forEach(b => {
+      boundaryNodes.add(b.live)
+      boundaryNodes.add(b.dark)
+      boundaryEdges.add(b.edge)
+    })
 
     steps.push({
       title: 'Step 4: DFS — Find Live→Dark Boundaries',
@@ -1179,7 +1512,151 @@ export default function NetworkCanvas({
     setNodes(p => p.map(n => ({ ...n, status: 'live', isFault: false })))
     setEdges(p => p.map(e => ({ ...e, status: 'live' })))
     setBoundaries([]); setFaultIds(new Set()); setSelectedSet(new Set())
+    setHighlightNodes(new Set()); setHighlightEdges(new Set()); setActiveStepData(null)
     if (onRepairAll) onRepairAll();
+  }
+
+  const handleInjectScenario = (scenarioId) => {
+    // Reset to clean grid first for pristine scenario evaluation
+    let baseEdges = edges.map(e => ({ ...e, status: 'live' }))
+    let baseNodes = nodes.map(n => ({ ...n, isFault: false, status: 'live' }))
+
+    const ss = baseNodes.find(n => n.type === 'substation') || baseNodes[0]
+    const adj = {}
+    baseNodes.forEach(n => { adj[n.id] = [] })
+    baseEdges.forEach(e => {
+      if (adj[e.from]) adj[e.from].push({ nid: e.to, eid: e.id, edge: e })
+      if (adj[e.to]) adj[e.to].push({ nid: e.from, eid: e.id, edge: e })
+    })
+    const treeVisited = new Set([ss.id])
+    const childrenMap = {}
+    baseNodes.forEach(n => { childrenMap[n.id] = [] })
+    const treeQ = [ss.id]
+    while (treeQ.length) {
+      const cur = treeQ.shift()
+      for (const nb of (adj[cur] || [])) {
+        if (!treeVisited.has(nb.nid)) {
+          treeVisited.add(nb.nid)
+          childrenMap[cur].push({ nid: nb.nid, eid: nb.eid, edge: nb.edge })
+          treeQ.push(nb.nid)
+        }
+      }
+    }
+    const countSubtree = (id) => {
+      let cnt = 1
+      for (const ch of (childrenMap[id] || [])) {
+        cnt += countSubtree(ch.nid)
+      }
+      return cnt
+    }
+
+    let newEdges = [...baseEdges]
+    let newNodes = [...baseNodes]
+
+    if (scenarioId === 'tree_fall_span') {
+      const validSpans = []
+      Object.keys(childrenMap).forEach(parentId => {
+        for (const ch of childrenMap[parentId]) {
+          if (ch.edge?.type === 'span' || ch.edge?.type === 'lt_line') {
+            const desc = countSubtree(ch.nid)
+            if (desc >= 3 && desc <= 12) {
+              validSpans.push({ edge: ch.edge, parent: parentId, child: ch.nid, desc })
+            }
+          }
+        }
+      })
+      const chosen = validSpans[Math.floor(validSpans.length / 2)] || validSpans[0]
+      const targetEdge = chosen?.edge || baseEdges.find(e => (e.type === 'span' || e.type === 'lt_line'))
+
+      if (targetEdge) {
+        newEdges = baseEdges.map(e => e.id === targetEdge.id ? { ...e, status: 'fault' } : e)
+        newNodes = rederiveStatuses(baseNodes, newEdges)
+        setEdges(newEdges)
+        setNodes(newNodes)
+        setFaultIds(new Set([targetEdge.id]))
+        const bounds = solveFault(newNodes, newEdges)
+        setBoundaries(bounds)
+        const a = newNodes.find(n => n.id === targetEdge.from)
+        const b = newNodes.find(n => n.id === targetEdge.to)
+        if (a && b) focusOnCoordinates((a.x + b.x) / 2, (a.y + b.y) / 2, 1.25)
+        if (onInjectFault) {
+          const fromNode = a || b
+          const dtId = fromNode?.meta?.dt_id || (fromNode?.id?.startsWith('bdt-') ? fromNode.id.slice(4) : 'D-0001')
+          onInjectFault('span', fromNode.id, dtId)
+        }
+      }
+    } else if (scenarioId === 'dt_overload') {
+      const dtsWithChildren = baseNodes.filter(n => n.type === 'dt').map(dt => ({
+        dt,
+        desc: countSubtree(dt.id),
+      })).filter(x => x.desc >= 3)
+      const targetDT = (dtsWithChildren[0] || { dt: baseNodes.find(n => n.type === 'dt') }).dt
+
+      if (targetDT) {
+        newNodes = baseNodes.map(n => n.id === targetDT.id ? { ...n, isFault: true } : n)
+        newNodes = rederiveStatuses(newNodes, baseEdges)
+        setEdges(baseEdges)
+        setNodes(newNodes)
+        setFaultIds(new Set([targetDT.id]))
+        const bounds = solveFault(newNodes, baseEdges)
+        setBoundaries(bounds)
+        focusOnCoordinates(targetDT.x, targetDT.y, 1.25)
+        if (onInjectFault) {
+          const dtId = targetDT.meta?.dt_id || (targetDT.id.startsWith('bdt-') ? targetDT.id.slice(4) : 'D-0001')
+          onInjectFault('dt', targetDT.id, dtId)
+        }
+      }
+    } else if (scenarioId === 'storm_multi_point') {
+      const validSpans = []
+      Object.keys(childrenMap).forEach(parentId => {
+        for (const ch of childrenMap[parentId]) {
+          if (ch.edge?.type === 'span' || ch.edge?.type === 'lt_line') {
+            validSpans.push(ch.edge)
+          }
+        }
+      })
+      const e1 = validSpans[1] || validSpans[0]
+      const e2 = validSpans[Math.max(0, validSpans.length - 2)] || validSpans[validSpans.length - 1]
+      const fSet = new Set()
+      if (e1) { newEdges = newEdges.map(e => e.id === e1.id ? { ...e, status: 'fault' } : e); fSet.add(e1.id) }
+      if (e2 && e2.id !== e1?.id) { newEdges = newEdges.map(e => e.id === e2.id ? { ...e, status: 'fault' } : e); fSet.add(e2.id) }
+      newNodes = rederiveStatuses(baseNodes, newEdges)
+      setEdges(newEdges)
+      setNodes(newNodes)
+      setFaultIds(fSet)
+      const bounds = solveFault(newNodes, newEdges)
+      setBoundaries(bounds)
+      if (e1) {
+        const a = newNodes.find(n => n.id === e1.from)
+        if (a) focusOnCoordinates(a.x, a.y, 1.1)
+      }
+    } else if (scenarioId === 'dead_sensor_false_alarm') {
+      const leafPoles = baseNodes.filter(n => n.type === 'pole' && (childrenMap[n.id] || []).length === 0)
+      const leaf = leafPoles[0] || baseNodes.find(n => n.type === 'pole')
+      if (leaf) {
+        newNodes = baseNodes.map(n => n.id === leaf.id ? { ...n, status: 'suspected_dark' } : n)
+        setEdges(baseEdges)
+        setNodes(newNodes)
+        setFaultIds(new Set())
+        setBoundaries([])
+        focusOnCoordinates(leaf.x, leaf.y, 1.35)
+      }
+    } else if (scenarioId === 'feeder_trip') {
+      const feederEdges = baseEdges.filter(e => e.type === 'feeder')
+      const fEdge = feederEdges[0]
+      if (fEdge) {
+        newEdges = baseEdges.map(e => e.id === fEdge.id ? { ...e, status: 'fault' } : e)
+        newNodes = rederiveStatuses(baseNodes, newEdges)
+        setEdges(newEdges)
+        setNodes(newNodes)
+        setFaultIds(new Set([fEdge.id]))
+        const bounds = solveFault(newNodes, newEdges)
+        setBoundaries(bounds)
+        const a = newNodes.find(n => n.id === fEdge.from)
+        const b = newNodes.find(n => n.id === fEdge.to)
+        if (a && b) focusOnCoordinates((a.x + b.x) / 2, (a.y + b.y) / 2, 1.15)
+      }
+    }
   }
 
   const handleRepairSingleLocal = (id) => {
@@ -1265,7 +1742,16 @@ export default function NetworkCanvas({
         <div className="canvas-toolbar-sep" />
         <div className="canvas-actions">
           <button className="canvas-act-btn random" onClick={handleRandom}>🎲 Random</button>
-          <button className="canvas-act-btn solve" onClick={handleSolve} disabled={!hasAnyFault}>🔍 Solve</button>
+          <button
+            className="canvas-act-btn solve"
+            onClick={() => {
+              handleSolve()
+              setShowScenarioLab(true)
+            }}
+            disabled={!hasAnyFault}
+          >
+            🔍 Solve & Visualize
+          </button>
           {selectedFaultCount > 0 && (
             <button className="canvas-act-btn repair-sel" onClick={handleRepairSelected}>
               🔧 Repair ({selectedFaultCount})
@@ -1276,6 +1762,13 @@ export default function NetworkCanvas({
           </button>
           <button className="canvas-act-btn clear" onClick={handleClear}>🗑️ Clear</button>
           <div className="canvas-toolbar-sep" />
+          <button
+            className={`canvas-act-btn lab-btn ${showScenarioLab ? 'active' : ''}`}
+            onClick={() => setShowScenarioLab(prev => !prev)}
+            title="Interactive Fault Simulation Scenarios & Step-by-Step Algorithm Solver"
+          >
+            🧪 Try Scenarios & Solver
+          </button>
           <button className={`canvas-act-btn study ${showStudy ? 'active' : ''}`} onClick={() => showStudy ? handleCloseStudy() : setShowStudy(true)}>📚 Study</button>
         </div>
       </div>
@@ -1949,6 +2442,34 @@ export default function NetworkCanvas({
           </div>
         </div>
       )}
+
+      {/* Interactive Scenario Lab & Step-by-Step Algorithm Visualizer */}
+      <ScenarioLabVisualizer
+        isOpen={showScenarioLab}
+        onClose={() => {
+          setShowScenarioLab(false)
+          setHighlightNodes(new Set())
+          setHighlightEdges(new Set())
+          setActiveStepData(null)
+        }}
+        nodes={nodes}
+        edges={edges}
+        boundaries={boundaries}
+        faultCount={faultCount}
+        onInjectScenario={handleInjectScenario}
+        onStepChange={(idx, step) => {
+          setCurrentStep(idx)
+          setActiveStepData(step)
+          setHighlightNodes(step.nodes || new Set())
+          setHighlightEdges(step.edges || new Set())
+          if (step.focusCoords) {
+            focusOnCoordinates(step.focusCoords.x, step.focusCoords.y, step.focusCoords.scale)
+          }
+        }}
+        onFocusCoordinates={focusOnCoordinates}
+        onSolve={handleSolve}
+        onRepairAll={handleRepairAll}
+      />
     </div>
   )
 }

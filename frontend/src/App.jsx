@@ -15,12 +15,10 @@ import AuditLogPanel from './components/AuditLogPanel'
 import SystemHealthPanel from './components/SystemHealthPanel'
 import LoginModal from './components/LoginModal'
 import ToastContainer from './components/ToastContainer'
+import MissionPanel from './components/MissionPanel'
 import { AuthProvider, useAuth } from './context/AuthContext'
-import {
-  DEMO_POLES, DEMO_DTS, DEMO_EDGES, DEMO_NETWORK_INFO, DEMO_TICKETS,
-  DEMO_ANALYTICS, DEMO_CREWS, DEMO_OUTAGES, DEMO_AUDIT_LOG, DEMO_HEALTH,
-  generateDemoExplanation,
-} from './mockData'
+import { generateDemoExplanation } from './mockData'
+import scenarioEngine from './ScenarioEngine'
 
 const API_URL = import.meta.env.VITE_API_BASE_URL || (
   window.location.hostname === 'localhost'
@@ -44,6 +42,21 @@ function MainApp() {
 
   const [connected, setConnected] = useState(false)
   const eventSourceRef = useRef(null)
+
+  // Scenario mission state
+  const [scenario, setScenario] = useState(null)
+  const [missionProgress, setMissionProgress] = useState({})
+
+  const currentRole = user?.role || 'OPERATOR'
+  const missions = scenario ? scenarioEngine.getMissions(currentRole) : []
+  const completionStats = scenario ? scenarioEngine.getCompletionStats(currentRole) : null
+
+  // Track a mission action
+  const trackMission = useCallback((action, extra = {}) => {
+    if (!demoMode || !scenario || !currentRole) return
+    const newProgress = scenarioEngine.trackAction(currentRole, action, extra)
+    setMissionProgress({ ...newProgress })
+  }, [demoMode, scenario, currentRole])
 
   // Map layers and operational filters
   const [layers, setLayers] = useState({
@@ -76,14 +89,22 @@ function MainApp() {
 
   // Fetch initial grid data
   const fetchData = useCallback(async () => {
-    // Demo mode: use local mock data
+    // Demo mode: use scenario data
     if (demoMode) {
-      setTickets([...DEMO_TICKETS])
-      setPoles([...DEMO_POLES])
-      setDts([...DEMO_DTS])
-      setEdges([...DEMO_EDGES])
-      setNetworkInfo({ ...DEMO_NETWORK_INFO })
+      // Load or generate scenario
+      let sc = scenarioEngine.getScenario()
+      if (!sc) {
+        sc = scenarioEngine.generateScenario()
+      }
+      setScenario(sc)
+      setTickets([...sc.tickets])
+      setPoles([...sc.network.poles])
+      setDts([...sc.network.dts])
+      setEdges([...sc.network.edges])
+      setNetworkInfo({ ...sc.networkInfo })
       setConnected(true)
+      // Load mission progress for current role
+      setMissionProgress(scenarioEngine.getProgress(currentRole))
       return
     }
 
@@ -104,7 +125,7 @@ function MainApp() {
     } catch (err) {
       console.error('Failed to fetch data:', err)
     }
-  }, [demoMode])
+  }, [demoMode, currentRole])
 
   // SSE connection for real-time updates
   useEffect(() => {
@@ -189,20 +210,37 @@ function MainApp() {
   const handleTransition = async (displayId, newStatus) => {
     // Demo mode: update local state
     if (demoMode) {
-      setTickets(prev => prev.map(t => {
-        if (t.display_id === displayId) {
-          const updated = { ...t, status: newStatus }
-          if (newStatus === 'acknowledged') updated.acknowledged_at = new Date().toISOString()
-          if (newStatus === 'crew_assigned') updated.crew_assigned_at = new Date().toISOString()
-          if (newStatus === 'resolved') updated.resolved_at = new Date().toISOString()
-          if (newStatus === 'verified') updated.verified_at = new Date().toISOString()
-          if (newStatus === 'closed') updated.closed_at = new Date().toISOString()
-          if (selectedTicket?.display_id === displayId) setSelectedTicket(updated)
-          return updated
-        }
-        return t
-      }))
+      let updatedTickets
+      setTickets(prev => {
+        updatedTickets = prev.map(t => {
+          if (t.display_id === displayId) {
+            const updated = { ...t, status: newStatus }
+            if (newStatus === 'acknowledged') updated.acknowledged_at = new Date().toISOString()
+            if (newStatus === 'crew_assigned') updated.crew_assigned_at = new Date().toISOString()
+            if (newStatus === 'resolved') updated.resolved_at = new Date().toISOString()
+            if (newStatus === 'verified') updated.verified_at = new Date().toISOString()
+            if (newStatus === 'closed') updated.closed_at = new Date().toISOString()
+            if (selectedTicket?.display_id === displayId) setSelectedTicket(updated)
+            return updated
+          }
+          return t
+        })
+        return updatedTickets
+      })
       addToast('Ticket Updated', `${displayId} → ${newStatus}`, 'success')
+
+      // Track mission
+      if (newStatus === 'acknowledged') {
+        const ackCount = (updatedTickets || tickets).filter(t => t.acknowledged_at).length
+        trackMission('acknowledge_ticket', { acknowledgedCount: ackCount })
+      } else if (newStatus === 'crew_assigned') {
+        trackMission('assign_crew')
+      } else if (newStatus === 'verified') {
+        trackMission('verify_restoration')
+      }
+
+      // Save updated tickets to scenario cache
+      if (updatedTickets) scenarioEngine.updateScenarioState({ tickets: updatedTickets })
       return
     }
 
@@ -234,6 +272,7 @@ function MainApp() {
   const handleExplain = async (displayId) => {
     // Demo mode: return local explanation
     if (demoMode) {
+      trackMission('explain_ticket')
       const ticket = tickets.find(t => t.display_id === displayId)
       if (ticket) return generateDemoExplanation(ticket)
       return null
@@ -310,7 +349,12 @@ function MainApp() {
   const handleRepairSinglePole = async (poleId) => {
     if (demoMode) {
       const cleanPoleId = poleId.startsWith('bp-') ? poleId.slice(3) : poleId
-      setPoles(prev => prev.map(p => p.pole_id === cleanPoleId ? { ...p, status: 'live' } : p))
+      setPoles(prev => {
+        const updated = prev.map(p => p.pole_id === cleanPoleId ? { ...p, status: 'live' } : p)
+        scenarioEngine.updateScenarioState({ poles: updated })
+        return updated
+      })
+      trackMission('repair_poles')
       addToast('✅ Repaired', `Pole ${cleanPoleId} restored`, 'success')
       return
     }
@@ -329,8 +373,18 @@ function MainApp() {
 
   const handleRepairAllAPI = async () => {
     if (demoMode) {
-      setPoles(prev => prev.map(p => ({ ...p, status: 'live' })))
-      setTickets(prev => prev.map(t => t.status !== 'verified' && t.status !== 'closed' ? { ...t, status: 'verified', verified_at: new Date().toISOString() } : t))
+      setPoles(prev => {
+        const updated = prev.map(p => ({ ...p, status: 'live' }))
+        scenarioEngine.updateScenarioState({ poles: updated })
+        return updated
+      })
+      setTickets(prev => {
+        const updated = prev.map(t => t.status !== 'verified' && t.status !== 'closed' ? { ...t, status: 'verified', verified_at: new Date().toISOString() } : t)
+        scenarioEngine.updateScenarioState({ tickets: updated })
+        return updated
+      })
+      trackMission('repair_poles')
+      trackMission('verify_restoration')
       addToast('✅ All Repaired', 'All poles restored, tickets verified', 'success')
       return
     }
@@ -354,8 +408,43 @@ function MainApp() {
   }
 
   // Layer & Filter toggles
+  // Track tab switches for missions
+  const handleTabSwitch = useCallback((tab) => {
+    setActiveTab(tab)
+    if (demoMode) {
+      const tabMissionMap = {
+        dashboard: 'view_dashboard',
+        health: 'view_health',
+        audit: 'view_audit',
+        crews: 'view_crews',
+        tickets: 'view_tickets',
+      }
+      if (tabMissionMap[tab]) trackMission(tabMissionMap[tab])
+    }
+  }, [demoMode, trackMission])
+
+  // Scenario reset / switch role handlers
+  const handleResetScenario = useCallback(() => {
+    scenarioEngine.resetScenario()
+    const sc = scenarioEngine.generateScenario()
+    setScenario(sc)
+    setTickets([...sc.tickets])
+    setPoles([...sc.network.poles])
+    setDts([...sc.network.dts])
+    setEdges([...sc.network.edges])
+    setNetworkInfo({ ...sc.networkInfo })
+    setMissionProgress({})
+    setSelectedTicket(null)
+    addToast('🔁 New Scenario', `${sc.template.icon} ${sc.template.name}`, 'info')
+  }, [addToast])
+
+  const handleSwitchRole = useCallback(() => {
+    logout()
+  }, [logout])
+
   const handleToggleLayer = (layerKey) => {
     setLayers(prev => ({ ...prev, [layerKey]: !prev[layerKey] }))
+    if (demoMode) trackMission('view_map')
   }
 
   const handleChangeFilter = (filterKey, value) => {
@@ -450,7 +539,7 @@ function MainApp() {
           {/* Tickets: all roles */}
           <button
             className={`sidebar-tab ${activeTab === 'tickets' ? 'active' : ''}`}
-            onClick={() => setActiveTab('tickets')}
+            onClick={() => handleTabSwitch('tickets')}
           >
             🎫 Tickets ({activeTickets.length})
           </button>
@@ -459,7 +548,7 @@ function MainApp() {
           {(isOperator || isAdmin) && (
             <button
               className={`sidebar-tab ${activeTab === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => handleTabSwitch('dashboard')}
             >
               📊 Dashboard
             </button>
@@ -468,7 +557,7 @@ function MainApp() {
           {/* Crews: Field Crew, Operator, Admin */}
           <button
             className={`sidebar-tab ${activeTab === 'crews' ? 'active' : ''}`}
-            onClick={() => setActiveTab('crews')}
+            onClick={() => handleTabSwitch('crews')}
           >
             👷 {isFieldCrew ? 'My Incidents' : 'Crews'}
           </button>
@@ -477,7 +566,7 @@ function MainApp() {
           {(isOperator || isAdmin) && (
             <button
               className={`sidebar-tab ${activeTab === 'outages' ? 'active' : ''}`}
-              onClick={() => setActiveTab('outages')}
+              onClick={() => handleTabSwitch('outages')}
             >
               📅 Outages
             </button>
@@ -487,7 +576,7 @@ function MainApp() {
           {(isOperator || isAdmin) && (
             <button
               className={`sidebar-tab ${activeTab === 'data' ? 'active' : ''}`}
-              onClick={() => setActiveTab('data')}
+              onClick={() => handleTabSwitch('data')}
             >
               📤 Data
             </button>
@@ -497,7 +586,7 @@ function MainApp() {
           {(isOperator || isAdmin) && (
             <button
               className={`sidebar-tab ${activeTab === 'simulator' ? 'active' : ''}`}
-              onClick={() => setActiveTab('simulator')}
+              onClick={() => handleTabSwitch('simulator')}
             >
               🔧 Simulator
             </button>
@@ -507,7 +596,7 @@ function MainApp() {
           {isAdmin && (
             <button
               className={`sidebar-tab ${activeTab === 'audit' ? 'active' : ''}`}
-              onClick={() => setActiveTab('audit')}
+              onClick={() => handleTabSwitch('audit')}
             >
               📜 Audit
             </button>
@@ -517,7 +606,7 @@ function MainApp() {
           {(isOperator || isAdmin) && (
             <button
               className={`sidebar-tab ${activeTab === 'health' ? 'active' : ''}`}
-              onClick={() => setActiveTab('health')}
+              onClick={() => handleTabSwitch('health')}
             >
               🩺 Health
             </button>
@@ -533,14 +622,15 @@ function MainApp() {
               onSelect={(t) => {
                 setSelectedTicket(t)
                 setShowInvestigation(false)
+                trackMission('view_ticket_detail')
               }}
             />
           ) : activeTab === 'dashboard' ? (
-            <DashboardPanel apiUrl={API_URL} demoData={demoMode ? DEMO_ANALYTICS : null} />
+            <DashboardPanel apiUrl={API_URL} demoData={demoMode && scenario ? scenario.analytics : null} />
           ) : activeTab === 'crews' ? (
-            <CrewManagementPanel apiUrl={API_URL} onRefreshTickets={fetchData} demoData={demoMode ? DEMO_CREWS : null} />
+            <CrewManagementPanel apiUrl={API_URL} onRefreshTickets={fetchData} demoData={demoMode && scenario ? scenario.crews : null} />
           ) : activeTab === 'outages' ? (
-            <OutageManagementPanel apiUrl={API_URL} demoData={demoMode ? DEMO_OUTAGES : null} />
+            <OutageManagementPanel apiUrl={API_URL} demoData={demoMode && scenario ? scenario.outages : null} />
           ) : activeTab === 'data' ? (
             <div>
               <div style={{ display: 'flex', gap: 6, padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-card)' }}>
@@ -564,9 +654,9 @@ function MainApp() {
               )}
             </div>
           ) : activeTab === 'audit' ? (
-            <AuditLogPanel apiUrl={API_URL} demoData={demoMode ? DEMO_AUDIT_LOG : null} />
+            <AuditLogPanel apiUrl={API_URL} demoData={demoMode ? [{ id: 1, action: 'SCENARIO_START', user: 'SYSTEM', details: `${scenario?.template?.name || 'Scenario'} initialized`, timestamp: scenario?.createdAt }] : null} />
           ) : activeTab === 'health' ? (
-            <SystemHealthPanel apiUrl={API_URL} demoData={demoMode ? DEMO_HEALTH : null} />
+            <SystemHealthPanel apiUrl={API_URL} demoData={demoMode ? { poles_tracked: scenario?.network?.totalPoles || 0 } : null} />
           ) : (
             <SimulatorPanel
               networkInfo={networkInfo}
@@ -636,7 +726,7 @@ function MainApp() {
               onExplain={handleExplain}
               onAssignCrewClick={() => {
                 setShowInvestigation(false)
-                setActiveTab('crews')
+                handleTabSwitch('crews')
               }}
             />
           ) : (
@@ -645,13 +735,29 @@ function MainApp() {
               onClose={() => setSelectedTicket(null)}
               onTransition={handleTransition}
               onExplain={handleExplain}
-              onInvestigate={() => setShowInvestigation(true)}
+              onInvestigate={() => {
+                setShowInvestigation(true)
+                trackMission('investigate_ticket')
+              }}
             />
           )
         )}
       </div>
 
       <ToastContainer toasts={toasts} />
+
+      {/* Mission Panel — demo mode only */}
+      {demoMode && scenario && (
+        <MissionPanel
+          scenario={scenario}
+          missions={missions}
+          progress={missionProgress}
+          completionStats={completionStats}
+          role={currentRole}
+          onReset={handleResetScenario}
+          onSwitchRole={handleSwitchRole}
+        />
+      )}
     </div>
   )
 }

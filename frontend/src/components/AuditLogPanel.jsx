@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
 
-function AuditLogPanel({ apiUrl }) {
+function AuditLogPanel({ apiUrl, demoData }) {
   const { authFetch } = useAuth()
-  const [logs, setLogs] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [logs, setLogs] = useState(demoData || [])
+  const [loading, setLoading] = useState(!demoData)
   const [actionFilter, setActionFilter] = useState('')
 
   const fetchLogs = useCallback(async () => {
+    if (demoData) { setLogs(demoData); setLoading(false); return }
     setLoading(true)
     try {
       const url = actionFilter
@@ -20,7 +21,7 @@ function AuditLogPanel({ apiUrl }) {
     } finally {
       setLoading(false)
     }
-  }, [apiUrl, actionFilter, authFetch])
+  }, [apiUrl, actionFilter, authFetch, demoData])
 
   useEffect(() => {
     fetchLogs()

@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
 
-function CrewManagementPanel({ apiUrl, onRefreshTickets, selectedTicketForAssign, onAssignmentDone }) {
+function CrewManagementPanel({ apiUrl, onRefreshTickets, selectedTicketForAssign, onAssignmentDone, demoData }) {
   const { user, isFieldCrew, isAdmin, authFetch } = useAuth()
-  const [crews, setCrews] = useState([])
+  const [crews, setCrews] = useState(demoData || [])
   const [myIncidents, setMyIncidents] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!demoData)
   const [showAddCrew, setShowAddCrew] = useState(false)
   const [newCrew, setNewCrew] = useState({ crew_id: '', name: '', lead_name: '', contact: '', base_station: '' })
   const [fieldNotesInput, setFieldNotesInput] = useState({})
@@ -13,22 +13,24 @@ function CrewManagementPanel({ apiUrl, onRefreshTickets, selectedTicketForAssign
   const [assignNotes, setAssignNotes] = useState('')
 
   const fetchCrews = useCallback(async () => {
+    if (demoData) { setCrews(demoData); return }
     try {
       const res = await authFetch(`${apiUrl}/api/crews/`)
       if (res.ok) setCrews(await res.json())
     } catch (err) {
       console.error('Failed to fetch crews:', err)
     }
-  }, [apiUrl, authFetch])
+  }, [apiUrl, authFetch, demoData])
 
   const fetchMyIncidents = useCallback(async () => {
+    if (demoData) return
     try {
       const res = await authFetch(`${apiUrl}/api/crews/my-incidents`)
       if (res.ok) setMyIncidents(await res.json())
     } catch (err) {
       console.error('Failed to fetch incidents:', err)
     }
-  }, [apiUrl, authFetch])
+  }, [apiUrl, authFetch, demoData])
 
   useEffect(() => {
     setLoading(true)

@@ -1,11 +1,17 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { DEMO_USERS } from '../mockData'
 
 const AuthContext = createContext(null)
+
+// Demo mode: true when no backend API URL is explicitly set
+const VITE_API = import.meta.env.VITE_API_BASE_URL || ''
+const IS_DEMO = !VITE_API
 
 export function AuthProvider({ children, apiUrl }) {
   const [user, setUser] = useState(null)
   const [token, setToken] = useState(() => localStorage.getItem('gridops_token'))
   const [loading, setLoading] = useState(true)
+  const [demoMode, setDemoMode] = useState(IS_DEMO)
 
   // Verify stored token on boot
   useEffect(() => {
@@ -16,6 +22,27 @@ export function AuthProvider({ children, apiUrl }) {
         return
       }
 
+      // Demo mode: restore user from localStorage
+      if (demoMode) {
+        const storedUser = localStorage.getItem('gridops_demo_user')
+        if (storedUser) {
+          try {
+            setUser(JSON.parse(storedUser))
+            setToken(storedToken)
+          } catch {
+            localStorage.removeItem('gridops_token')
+            localStorage.removeItem('gridops_demo_user')
+            setToken(null)
+          }
+        } else {
+          localStorage.removeItem('gridops_token')
+          setToken(null)
+        }
+        setLoading(false)
+        return
+      }
+
+      // Real mode: verify with backend
       try {
         const res = await fetch(`${apiUrl}/api/auth/me`, {
           headers: { Authorization: `Bearer ${storedToken}` },
@@ -30,35 +57,85 @@ export function AuthProvider({ children, apiUrl }) {
           setUser(null)
         }
       } catch (err) {
-        console.error('Failed to verify session token:', err)
+        // Backend unreachable — switch to demo mode
+        console.warn('Backend unreachable, switching to demo mode:', err.message)
+        setDemoMode(true)
+        const storedUser = localStorage.getItem('gridops_demo_user')
+        if (storedUser) {
+          try {
+            setUser(JSON.parse(storedUser))
+          } catch {
+            localStorage.removeItem('gridops_token')
+            localStorage.removeItem('gridops_demo_user')
+            setToken(null)
+          }
+        } else {
+          localStorage.removeItem('gridops_token')
+          setToken(null)
+        }
       } finally {
         setLoading(false)
       }
     }
 
     verifyToken()
-  }, [apiUrl])
+  }, [apiUrl, demoMode])
 
   const login = async (email, password) => {
-    const res = await fetch(`${apiUrl}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    })
-
-    const data = await res.json()
-    if (!res.ok) {
-      throw new Error(data.detail || 'Login failed')
+    // Demo mode: validate locally
+    if (demoMode) {
+      const demoUser = DEMO_USERS[email]
+      if (!demoUser || demoUser.password !== password) {
+        throw new Error('Invalid email or password')
+      }
+      const fakeToken = `demo-token-${Date.now()}`
+      localStorage.setItem('gridops_token', fakeToken)
+      localStorage.setItem('gridops_demo_user', JSON.stringify(demoUser.user))
+      setToken(fakeToken)
+      setUser(demoUser.user)
+      return demoUser.user
     }
 
-    localStorage.setItem('gridops_token', data.access_token)
-    setToken(data.access_token)
-    setUser(data.user)
-    return data.user
+    // Real mode: call backend
+    try {
+      const res = await fetch(`${apiUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.detail || 'Login failed')
+      }
+
+      localStorage.setItem('gridops_token', data.access_token)
+      setToken(data.access_token)
+      setUser(data.user)
+      return data.user
+    } catch (err) {
+      // If backend is unreachable, try demo mode
+      if (err.message === 'Failed to fetch' || err.name === 'TypeError') {
+        console.warn('Backend unreachable during login, falling back to demo mode')
+        setDemoMode(true)
+        const demoUser = DEMO_USERS[email]
+        if (!demoUser || demoUser.password !== password) {
+          throw new Error('Backend unavailable. Use demo credentials: admin@gridops.ai / admin123')
+        }
+        const fakeToken = `demo-token-${Date.now()}`
+        localStorage.setItem('gridops_token', fakeToken)
+        localStorage.setItem('gridops_demo_user', JSON.stringify(demoUser.user))
+        setToken(fakeToken)
+        setUser(demoUser.user)
+        return demoUser.user
+      }
+      throw err
+    }
   }
 
   const logout = useCallback(() => {
     localStorage.removeItem('gridops_token')
+    localStorage.removeItem('gridops_demo_user')
     setToken(null)
     setUser(null)
   }, [])
@@ -89,6 +166,7 @@ export function AuthProvider({ children, apiUrl }) {
         isAdmin,
         isOperator,
         isFieldCrew,
+        demoMode,
       }}
     >
       {children}

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 
-function OutageManagementPanel({ apiUrl, onRefreshOutages }) {
-  const [outages, setOutages] = useState([])
-  const [loading, setLoading] = useState(true)
+function OutageManagementPanel({ apiUrl, onRefreshOutages, demoData }) {
+  const [outages, setOutages] = useState(demoData || [])
+  const [loading, setLoading] = useState(!demoData)
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState({
     scope: 'feeder',
@@ -13,6 +13,7 @@ function OutageManagementPanel({ apiUrl, onRefreshOutages }) {
   })
 
   const fetchOutages = useCallback(async () => {
+    if (demoData) { setOutages(demoData); setLoading(false); return }
     try {
       const res = await fetch(`${apiUrl}/api/scheduled-outages/?active_only=false`)
       if (res.ok) setOutages(await res.json())
@@ -21,7 +22,7 @@ function OutageManagementPanel({ apiUrl, onRefreshOutages }) {
     } finally {
       setLoading(false)
     }
-  }, [apiUrl])
+  }, [apiUrl, demoData])
 
   useEffect(() => {
     fetchOutages()

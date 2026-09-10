@@ -16,6 +16,11 @@ import SystemHealthPanel from './components/SystemHealthPanel'
 import LoginModal from './components/LoginModal'
 import ToastContainer from './components/ToastContainer'
 import { AuthProvider, useAuth } from './context/AuthContext'
+import {
+  DEMO_POLES, DEMO_DTS, DEMO_EDGES, DEMO_NETWORK_INFO, DEMO_TICKETS,
+  DEMO_ANALYTICS, DEMO_CREWS, DEMO_OUTAGES, DEMO_AUDIT_LOG, DEMO_HEALTH,
+  generateDemoExplanation,
+} from './mockData'
 
 const API_URL = import.meta.env.VITE_API_BASE_URL || (
   window.location.hostname === 'localhost'
@@ -24,7 +29,7 @@ const API_URL = import.meta.env.VITE_API_BASE_URL || (
 )
 
 function MainApp() {
-  const { user, token, loading: authLoading, logout, isAdmin, isOperator, isFieldCrew } = useAuth()
+  const { user, token, loading: authLoading, logout, isAdmin, isOperator, isFieldCrew, demoMode } = useAuth()
 
   const [tickets, setTickets] = useState([])
   const [selectedTicket, setSelectedTicket] = useState(null)
@@ -71,6 +76,17 @@ function MainApp() {
 
   // Fetch initial grid data
   const fetchData = useCallback(async () => {
+    // Demo mode: use local mock data
+    if (demoMode) {
+      setTickets([...DEMO_TICKETS])
+      setPoles([...DEMO_POLES])
+      setDts([...DEMO_DTS])
+      setEdges([...DEMO_EDGES])
+      setNetworkInfo({ ...DEMO_NETWORK_INFO })
+      setConnected(true)
+      return
+    }
+
     try {
       const [ticketsRes, polesRes, dtsRes, edgesRes, infoRes] = await Promise.all([
         fetch(`${API_URL}/api/tickets/`),
@@ -88,11 +104,11 @@ function MainApp() {
     } catch (err) {
       console.error('Failed to fetch data:', err)
     }
-  }, [])
+  }, [demoMode])
 
   // SSE connection for real-time updates
   useEffect(() => {
-    if (!token) return
+    if (!token || demoMode) return
 
     const connectSSE = () => {
       const es = new EventSource(`${API_URL}/api/events/stream`)
@@ -171,6 +187,25 @@ function MainApp() {
   }, [isFieldCrew])
 
   const handleTransition = async (displayId, newStatus) => {
+    // Demo mode: update local state
+    if (demoMode) {
+      setTickets(prev => prev.map(t => {
+        if (t.display_id === displayId) {
+          const updated = { ...t, status: newStatus }
+          if (newStatus === 'acknowledged') updated.acknowledged_at = new Date().toISOString()
+          if (newStatus === 'crew_assigned') updated.crew_assigned_at = new Date().toISOString()
+          if (newStatus === 'resolved') updated.resolved_at = new Date().toISOString()
+          if (newStatus === 'verified') updated.verified_at = new Date().toISOString()
+          if (newStatus === 'closed') updated.closed_at = new Date().toISOString()
+          if (selectedTicket?.display_id === displayId) setSelectedTicket(updated)
+          return updated
+        }
+        return t
+      }))
+      addToast('Ticket Updated', `${displayId} → ${newStatus}`, 'success')
+      return
+    }
+
     try {
       const res = await fetch(`${API_URL}/api/tickets/${displayId}/transition`, {
         method: 'POST',
@@ -197,6 +232,13 @@ function MainApp() {
   }
 
   const handleExplain = async (displayId) => {
+    // Demo mode: return local explanation
+    if (demoMode) {
+      const ticket = tickets.find(t => t.display_id === displayId)
+      if (ticket) return generateDemoExplanation(ticket)
+      return null
+    }
+
     try {
       const res = await fetch(`${API_URL}/api/ai/explain/${displayId}`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -209,6 +251,40 @@ function MainApp() {
   }
 
   const handleInjectFault = async (type, targetId, parentId) => {
+    // Demo mode: simulate locally
+    if (demoMode) {
+      const poleId = targetId.startsWith('bp-') ? targetId.slice(3) : targetId
+      const dtId = type === 'dt' ? (targetId.startsWith('bdt-') ? targetId.slice(4) : targetId) : parentId
+      const affectedPoles = poles.filter(p => p.dt_id === dtId && (type === 'dt' || p.seq_on_line > (poles.find(pp => pp.pole_id === poleId)?.seq_on_line || 0)))
+      setPoles(prev => prev.map(p => affectedPoles.find(a => a.pole_id === p.pole_id) ? { ...p, status: 'confirmed_dark' } : p))
+      const newTicket = {
+        ticket_id: Date.now(),
+        display_id: `FLT-DEMO-${String(tickets.length + 1).padStart(3, '0')}`,
+        status: 'detected',
+        fault_type: type,
+        feeder_id: affectedPoles[0]?.feeder_id || 'F-01-01',
+        dt_id: dtId,
+        boundary_live_pole: type === 'span' ? poleId : null,
+        boundary_dark_pole: affectedPoles[0]?.pole_id || null,
+        fault_lat: affectedPoles[0]?.lat,
+        fault_lon: affectedPoles[0]?.lon,
+        affected_poles: affectedPoles.map(p => p.pole_id),
+        affected_pole_count: affectedPoles.length,
+        estimated_households: affectedPoles.length * 4,
+        confidence_label: 'HIGH',
+        confidence_factors: { topology_source: 'surveyed', fault_type: type },
+        topology_source: 'surveyed',
+        span_distance_m: 42,
+        total_dark_line_length_m: affectedPoles.length * 35,
+        dt_distance_m: 0,
+        priority_score: 200 + affectedPoles.length * 10,
+        detected_at: new Date().toISOString(),
+      }
+      setTickets(prev => [newTicket, ...prev])
+      addToast(`⚡ Demo Fault: ${newTicket.display_id}`, `${type} fault — ${affectedPoles.length} poles affected`, 'fault')
+      return
+    }
+
     try {
       if (type === 'span') {
         const poleId = targetId.startsWith('bp-') ? targetId.slice(3) : targetId
@@ -232,6 +308,12 @@ function MainApp() {
   }
 
   const handleRepairSinglePole = async (poleId) => {
+    if (demoMode) {
+      const cleanPoleId = poleId.startsWith('bp-') ? poleId.slice(3) : poleId
+      setPoles(prev => prev.map(p => p.pole_id === cleanPoleId ? { ...p, status: 'live' } : p))
+      addToast('✅ Repaired', `Pole ${cleanPoleId} restored`, 'success')
+      return
+    }
     try {
       const cleanPoleId = poleId.startsWith('bp-') ? poleId.slice(3) : poleId
       await fetch(`${API_URL}/api/simulator/repair/pole`, {
@@ -246,6 +328,12 @@ function MainApp() {
   }
 
   const handleRepairAllAPI = async () => {
+    if (demoMode) {
+      setPoles(prev => prev.map(p => ({ ...p, status: 'live' })))
+      setTickets(prev => prev.map(t => t.status !== 'verified' && t.status !== 'closed' ? { ...t, status: 'verified', verified_at: new Date().toISOString() } : t))
+      addToast('✅ All Repaired', 'All poles restored, tickets verified', 'success')
+      return
+    }
     try {
       const res = await fetch(`${API_URL}/api/simulator/active-faults`)
       if (res.ok) {
@@ -318,7 +406,7 @@ function MainApp() {
         <div className="header-status">
           <span>
             <span className={`status-dot ${connected ? 'live' : 'error'}`} />
-            {connected ? 'Live Stream' : 'Reconnecting...'}
+            {connected ? (demoMode ? 'Demo Mode' : 'Live Stream') : 'Reconnecting...'}
           </span>
           {networkInfo && (
             <>
@@ -326,6 +414,11 @@ function MainApp() {
               <span>{networkInfo.dts} DTs</span>
               <span>{activeTickets.length} active faults</span>
             </>
+          )}
+          {demoMode && (
+            <span className="provenance-badge provenance-inferred" title="Running with demo data — no backend connected" style={{ background: '#f59e0b22', color: '#f59e0b', border: '1px solid #f59e0b44' }}>
+              ⚡ DEMO
+            </span>
           )}
           <span className="provenance-badge provenance-imported" title="Source of truth network topology">
             SURVEYED
@@ -443,11 +536,11 @@ function MainApp() {
               }}
             />
           ) : activeTab === 'dashboard' ? (
-            <DashboardPanel apiUrl={API_URL} />
+            <DashboardPanel apiUrl={API_URL} demoData={demoMode ? DEMO_ANALYTICS : null} />
           ) : activeTab === 'crews' ? (
-            <CrewManagementPanel apiUrl={API_URL} onRefreshTickets={fetchData} />
+            <CrewManagementPanel apiUrl={API_URL} onRefreshTickets={fetchData} demoData={demoMode ? DEMO_CREWS : null} />
           ) : activeTab === 'outages' ? (
-            <OutageManagementPanel apiUrl={API_URL} />
+            <OutageManagementPanel apiUrl={API_URL} demoData={demoMode ? DEMO_OUTAGES : null} />
           ) : activeTab === 'data' ? (
             <div>
               <div style={{ display: 'flex', gap: 6, padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-card)' }}>
@@ -471,9 +564,9 @@ function MainApp() {
               )}
             </div>
           ) : activeTab === 'audit' ? (
-            <AuditLogPanel apiUrl={API_URL} />
+            <AuditLogPanel apiUrl={API_URL} demoData={demoMode ? DEMO_AUDIT_LOG : null} />
           ) : activeTab === 'health' ? (
-            <SystemHealthPanel apiUrl={API_URL} />
+            <SystemHealthPanel apiUrl={API_URL} demoData={demoMode ? DEMO_HEALTH : null} />
           ) : (
             <SimulatorPanel
               networkInfo={networkInfo}

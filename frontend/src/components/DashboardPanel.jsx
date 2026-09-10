@@ -1,11 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
 
-function DashboardPanel({ apiUrl }) {
-  const [overview, setOverview] = useState(null)
-  const [loading, setLoading] = useState(true)
+function DashboardPanel({ apiUrl, demoData }) {
+  const [overview, setOverview] = useState(demoData || null)
+  const [loading, setLoading] = useState(!demoData)
   const [error, setError] = useState(null)
 
   const fetchOverview = useCallback(async () => {
+    if (demoData) {
+      setOverview(demoData)
+      setLoading(false)
+      return
+    }
     try {
       const res = await fetch(`${apiUrl}/api/analytics/overview`)
       if (res.ok) {
@@ -17,13 +22,14 @@ function DashboardPanel({ apiUrl }) {
       setError('Failed to fetch analytics')
     }
     setLoading(false)
-  }, [apiUrl])
+  }, [apiUrl, demoData])
 
   useEffect(() => {
     fetchOverview()
+    if (demoData) return
     const interval = setInterval(fetchOverview, 15000) // Refresh every 15s
     return () => clearInterval(interval)
-  }, [fetchOverview])
+  }, [fetchOverview, demoData])
 
   if (loading) {
     return (

@@ -1,11 +1,22 @@
 import { useState, useEffect, useCallback } from 'react'
 
-function SystemHealthPanel({ apiUrl }) {
-  const [healthData, setHealthData] = useState(null)
-  const [loading, setLoading] = useState(true)
+function SystemHealthPanel({ apiUrl, demoData }) {
+  const [healthData, setHealthData] = useState(demoData ? {
+    overall_status: 'healthy',
+    subsystems: {
+      database: { latency_ms: 1, poles_in_db: demoData.poles_tracked || 0, tickets_in_db: 3 },
+      localization_engine: { poles_tracked: demoData.poles_tracked || 0, graph_nodes: (demoData.poles_tracked || 0) + 6, graph_edges: (demoData.poles_tracked || 0) + 5, sweep_interval_s: 10 },
+      telemetry: { total_events_logged: 0 },
+      sse_broadcast: { active_subscribers: 1, channel: 'demo-local' },
+      simulator: { active_faults_simulated: 2 },
+      ai_service: { status: 'healthy', provider: 'Demo Mode (Local)' },
+    },
+  } : null)
+  const [loading, setLoading] = useState(!demoData)
   const [error, setError] = useState(null)
 
   const fetchHealth = useCallback(async () => {
+    if (demoData) return
     setLoading(true)
     try {
       const res = await fetch(`${apiUrl}/api/system-health`)
@@ -20,13 +31,14 @@ function SystemHealthPanel({ apiUrl }) {
     } finally {
       setLoading(false)
     }
-  }, [apiUrl])
+  }, [apiUrl, demoData])
 
   useEffect(() => {
     fetchHealth()
+    if (demoData) return
     const interval = setInterval(fetchHealth, 10000)
     return () => clearInterval(interval)
-  }, [fetchHealth])
+  }, [fetchHealth, demoData])
 
   if (loading && !healthData) {
     return (

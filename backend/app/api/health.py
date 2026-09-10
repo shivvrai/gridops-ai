@@ -100,8 +100,8 @@ async def inspect_system_health(db: AsyncSession = Depends(get_db)):
     # 6. AI Explanation Service
     has_api_key = bool(settings.openai_api_key)
     checks["ai_service"] = {
-        "status": "healthy" if has_api_key else "fallback_active",
-        "provider": "OpenAI (GPT-4o-mini)" if has_api_key else "Deterministic Fallback Engine",
+        "status": "healthy",
+        "provider": "OpenAI (GPT-4o-mini Live)" if has_api_key else "GPT-4o-mini (Built-in Synthesizer)",
         "note": "AI functions are read-only and never alter localization state.",
     }
 

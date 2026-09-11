@@ -16,6 +16,7 @@ import SystemHealthPanel from './components/SystemHealthPanel'
 import LoginModal from './components/LoginModal'
 import ToastContainer from './components/ToastContainer'
 import MissionPanel from './components/MissionPanel'
+import NotificationBell from './components/NotificationBell'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { generateDemoExplanation } from './mockData'
 import scenarioEngine from './ScenarioEngine'
@@ -39,6 +40,35 @@ function MainApp() {
   const [activeTab, setActiveTab] = useState('tickets')
   const [dataSubMode, setDataSubMode] = useState('wizard') // 'wizard' or 'uploader'
   const [toasts, setToasts] = useState([])
+
+  // Observer Pattern Notifications state
+  const [notifications, setNotifications] = useState([])
+  const notifIdCounter = useRef(0)
+
+  const addNotification = useCallback((eventType, data, priority = 'MEDIUM') => {
+    const displayId = data?.display_id || data?.pole_id || null
+    const messages = {
+      ticket_created: `New ${data?.fault_type || 'grid'} fault detected${data?.affected_pole_count ? ` — ${data.affected_pole_count} poles affected` : ''}`,
+      ticket_updated: `Ticket ${displayId || ''} transitioned to ${data?.status || 'updated'}`,
+      ticket_verified: `Ticket ${displayId || ''} verified — all poles restored`,
+      device_anomaly: `Device anomaly on pole ${data?.pole_id || 'unknown'}: ${data?.reason || 'sensor failure'}`,
+    }
+    notifIdCounter.current += 1
+    setNotifications(prev => [{
+      id: `notif-${notifIdCounter.current}-${Date.now()}`,
+      event_type: eventType,
+      message: messages[eventType] || `Event: ${eventType}`,
+      priority,
+      displayId,
+      timestamp: new Date().toISOString(),
+      read: false,
+    }, ...prev].slice(0, 100))
+  }, [])
+
+  const handleClearNotifications = useCallback(() => setNotifications([]), [])
+  const handleMarkAllRead = useCallback(() => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })))
+  }, [])
 
   const [connected, setConnected] = useState(false)
   const eventSourceRef = useRef(null)
@@ -105,6 +135,20 @@ function MainApp() {
       setConnected(true)
       // Load mission progress for current role
       setMissionProgress(scenarioEngine.getProgress(currentRole))
+
+      // Initialize notifications from scenario active faults if notification list is currently empty
+      setNotifications(prev => {
+        if (prev.length > 0) return prev
+        return (sc.tickets || []).map((t, idx) => ({
+          id: `notif-sc-${t.ticket_id || idx}-${Date.now()}`,
+          event_type: 'ticket_created',
+          message: `${sc.template?.name || 'Scenario'}: ${t.fault_type} fault on ${t.dt_id || t.feeder_id || 'network'} (${t.affected_pole_count || 0} poles dark)`,
+          priority: (t.priority_score >= 200 || t.fault_type === 'feeder') ? 'CRITICAL' : 'HIGH',
+          displayId: t.display_id,
+          timestamp: t.detected_at || new Date().toISOString(),
+          read: false,
+        }))
+      })
       return
     }
 
@@ -150,11 +194,13 @@ function MainApp() {
               `${data.fault_type} fault — ${data.affected_pole_count} poles affected`,
               'fault'
             )
+            addNotification('ticket_created', data, data.priority_score >= 200 ? 'CRITICAL' : 'HIGH')
             fetch(`${API_URL}/api/simulator/poles`).then(r => r.ok && r.json().then(setPoles))
           } else if (type === 'ticket_updated') {
             setTickets(prev => prev.map(t =>
               t.display_id === data.display_id ? { ...t, ...data } : t
             ))
+            addNotification('ticket_updated', data, 'MEDIUM')
           } else if (type === 'ticket_verified') {
             setTickets(prev => prev.map(t =>
               t.display_id === data.display_id ? { ...t, status: 'verified' } : t
@@ -164,6 +210,7 @@ function MainApp() {
               'All affected poles are energized',
               'success'
             )
+            addNotification('ticket_verified', data, 'HIGH')
             fetch(`${API_URL}/api/simulator/poles`).then(r => r.ok && r.json().then(setPoles))
           } else if (type === 'device_anomaly') {
             addToast(
@@ -171,6 +218,7 @@ function MainApp() {
               `Pole ${data.pole_id}: ${data.reason}`,
               'info'
             )
+            addNotification('device_anomaly', data, 'MEDIUM')
           }
         } catch (e) {
           console.error('SSE parse error:', e)
@@ -228,6 +276,11 @@ function MainApp() {
         return updatedTickets
       })
       addToast('Ticket Updated', `${displayId} → ${newStatus}`, 'success')
+      addNotification(
+        newStatus === 'verified' ? 'ticket_verified' : 'ticket_updated',
+        { display_id: displayId, status: newStatus },
+        newStatus === 'verified' ? 'HIGH' : 'MEDIUM'
+      )
 
       // Track mission
       if (newStatus === 'acknowledged') {
@@ -292,9 +345,14 @@ function MainApp() {
   const handleInjectFault = async (type, targetId, parentId) => {
     // Demo mode: simulate locally
     if (demoMode) {
-      const poleId = targetId.startsWith('bp-') ? targetId.slice(3) : targetId
+      const poleId = targetId ? (targetId.startsWith('bp-') ? targetId.slice(3) : targetId) : null
       const dtId = type === 'dt' ? (targetId.startsWith('bdt-') ? targetId.slice(4) : targetId) : parentId
-      const affectedPoles = poles.filter(p => p.dt_id === dtId && (type === 'dt' || p.seq_on_line > (poles.find(pp => pp.pole_id === poleId)?.seq_on_line || 0)))
+      const affectedPoles = type === 'feeder'
+        ? poles.filter(p => p.feeder_id === (parentId || 'F-01-01'))
+        : (type === 'anomaly'
+          ? poles.filter(p => p.pole_id === poleId)
+          : poles.filter(p => p.dt_id === dtId && (type === 'dt' || p.seq_on_line > (poles.find(pp => pp.pole_id === poleId)?.seq_on_line || 0))))
+
       setPoles(prev => prev.map(p => affectedPoles.find(a => a.pole_id === p.pole_id) ? { ...p, status: 'confirmed_dark' } : p))
       const newTicket = {
         ticket_id: Date.now(),
@@ -302,7 +360,7 @@ function MainApp() {
         status: 'detected',
         fault_type: type,
         feeder_id: affectedPoles[0]?.feeder_id || 'F-01-01',
-        dt_id: dtId,
+        dt_id: dtId || 'DT-001',
         boundary_live_pole: type === 'span' ? poleId : null,
         boundary_dark_pole: affectedPoles[0]?.pole_id || null,
         fault_lat: affectedPoles[0]?.lat,
@@ -320,7 +378,9 @@ function MainApp() {
         detected_at: new Date().toISOString(),
       }
       setTickets(prev => [newTicket, ...prev])
-      addToast(`⚡ Demo Fault: ${newTicket.display_id}`, `${type} fault — ${affectedPoles.length} poles affected`, 'fault')
+      setSelectedTicket(newTicket)
+      addToast(`⚡ Fault Injected: ${newTicket.display_id}`, `${type} fault — ${affectedPoles.length} poles affected`, 'fault')
+      addNotification('ticket_created', newTicket, newTicket.priority_score >= 200 ? 'CRITICAL' : 'HIGH')
       return
     }
 
@@ -436,7 +496,21 @@ function MainApp() {
     setMissionProgress({})
     setSelectedTicket(null)
     addToast('🔁 New Scenario', `${sc.template.icon} ${sc.template.name}`, 'info')
-  }, [addToast])
+
+    // Add notifications and toasts for every fault in the new scenario!
+    ;(sc.tickets || []).forEach(ticket => {
+      addNotification(
+        'ticket_created',
+        ticket,
+        (ticket.priority_score >= 200 || ticket.fault_type === 'feeder') ? 'CRITICAL' : 'HIGH'
+      )
+      addToast(
+        `⚡ Fault: ${ticket.display_id}`,
+        `${ticket.fault_type} fault — ${ticket.affected_pole_count} poles affected`,
+        'fault'
+      )
+    })
+  }, [addToast, addNotification])
 
   const handleSwitchRole = useCallback(() => {
     logout()
@@ -514,8 +588,13 @@ function MainApp() {
           </span>
         </div>
 
-        {/* User Badge & Sign Out */}
+        {/* Notification Bell (Observer Pattern) & User Badge & Sign Out */}
         <div className="header-user">
+          <NotificationBell
+            notifications={notifications}
+            onClearAll={handleClearNotifications}
+            onMarkAllRead={handleMarkAllRead}
+          />
           <div className="user-profile">
             <span className="user-avatar">
               {user.role === 'ADMIN' ? '🛡️' : user.role === 'OPERATOR' ? '🖥️' : '👷'}

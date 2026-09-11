@@ -17,34 +17,66 @@ from sqlalchemy import select, update, and_
 
 from app.models.schemas import Ticket, TicketAffectedPole, Pole
 from app.core.localization import FaultBoundary, LocalizationEngine
+from app.core.topology import _haversine_m
+from app.core.notifications import NotificationHub, GridEvent, EventObserver
 
 logger = logging.getLogger(__name__)
 
-# Valid state transitions
+# Valid ticket state transitions (finite state machine)
 VALID_TRANSITIONS = {
-    "detected": ["acknowledged"],
-    "acknowledged": ["crew_assigned"],
-    "crew_assigned": ["resolved"],
-    "resolved": ["verified"],  # system-only
+    "detected": ["investigating", "suppressed"],
+    "investigating": ["dispatched", "suppressed"],
+    "dispatched": ["repaired"],
+    "repaired": ["verified"],
     "verified": ["closed"],
+    "suppressed": ["closed"],
     "closed": [],
 }
 
-# States that allow auto-verification (system detects all poles live)
-AUTO_VERIFY_STATES = {"detected", "acknowledged", "crew_assigned", "resolved"}
+# Auto-verifiable states (can transition to verified if all poles live)
+AUTO_VERIFY_STATES = {"detected", "investigating", "dispatched", "repaired"}
 
 
 class TicketManager:
-    """Manages fault ticket lifecycle."""
+    """
+    Manages ticket lifecycle: creation, state transitions, duplicate detection,
+    and auto-verification on power restoration.
+    """
 
-    def __init__(self, engine: LocalizationEngine):
+    def __init__(self, engine: LocalizationEngine, publisher: Optional[NotificationHub] = None):
         self.engine = engine
         # Active tickets by display_id for quick lookup
         self.active_tickets: dict[str, dict] = {}
         # Mapping: pole_id → set of display_ids affecting it
         self.pole_to_tickets: dict[str, set[str]] = {}
-        # SSE event callback (set by the app)
-        self.on_ticket_event: Optional[callable] = None
+        # Observer Pattern NotificationHub for decoupled event dispatching
+        self.publisher: NotificationHub = publisher or NotificationHub()
+        self._legacy_on_ticket_event: Optional[callable] = None
+        self._legacy_observer: Optional[EventObserver] = None
+
+    @property
+    def on_ticket_event(self) -> Optional[callable]:
+        """Backward-compatible access to legacy event callback."""
+        return self._legacy_on_ticket_event
+
+    @on_ticket_event.setter
+    def on_ticket_event(self, callback: Optional[callable]):
+        """Wrap legacy single-callback into an EventObserver attached to NotificationHub."""
+        if self._legacy_observer:
+            self.publisher.unsubscribe(self._legacy_observer)
+            self._legacy_observer = None
+
+        self._legacy_on_ticket_event = callback
+        if callback:
+            class _LegacyCallbackObserver(EventObserver):
+                def __init__(self, cb):
+                    self.cb = cb
+
+                async def notify(self, event: GridEvent):
+                    await self.cb(event.event_type, event.data)
+
+            self._legacy_observer = _LegacyCallbackObserver(callback)
+            self.publisher.subscribe(self._legacy_observer)
 
     async def _generate_display_id(self, db: AsyncSession) -> str:
         """Generate a unique human-readable ticket display ID collision-safe with the DB."""
@@ -125,9 +157,13 @@ class TicketManager:
                     f"{'feeder ' + boundary.feeder_id if boundary.fault_type == 'feeder' else 'DT ' + str(boundary.dt_id)}, "
                     f"confidence={confidence_label}, affected={len(boundary.affected_poles)} poles")
 
-        # Notify SSE listeners
-        if self.on_ticket_event:
-            await self.on_ticket_event("ticket_created", ticket_data)
+        # Notify observers via Observer Pattern NotificationHub
+        priority = "CRITICAL" if (priority_score and priority_score >= 70) else "HIGH"
+        await self.publisher.publish(GridEvent(
+            event_type="ticket_created",
+            data=ticket_data,
+            priority=priority,
+        ))
 
         return ticket_data
 
@@ -186,13 +222,16 @@ class TicketManager:
             # Clean up pole-to-ticket mappings
             self._cleanup_ticket(display_id)
 
-        # Notify SSE
-        if self.on_ticket_event:
-            await self.on_ticket_event("ticket_updated", {
+        # Notify observers via Observer Pattern NotificationHub
+        await self.publisher.publish(GridEvent(
+            event_type="ticket_updated",
+            data={
                 "display_id": display_id,
                 "status": new_status,
-                "timestamp": now.isoformat(),
-            })
+                "timestamp": now.isoformat() if now else None,
+            },
+            priority="MEDIUM",
+        ))
 
         logger.info(f"Ticket {display_id}: {current} → {new_status}")
         return True, f"Ticket {display_id} transitioned to '{new_status}'"
@@ -232,12 +271,16 @@ class TicketManager:
 
                     logger.info(f"Ticket {display_id} auto-verified: all {ticket.affected_pole_count} poles restored")
 
-                    if self.on_ticket_event:
-                        await self.on_ticket_event("ticket_verified", {
+                    # Notify observers via Observer Pattern NotificationHub
+                    await self.publisher.publish(GridEvent(
+                        event_type="ticket_verified",
+                        data={
                             "display_id": display_id,
                             "status": "verified",
                             "timestamp": now.isoformat(),
-                        })
+                        },
+                        priority="HIGH",
+                    ))
 
         return verified
 

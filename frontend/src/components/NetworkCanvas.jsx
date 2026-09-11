@@ -155,10 +155,19 @@ function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel, highlightColor, show
     ctx.restore()
   }
 
+  const darkStatuses = ['dark', 'confirmed_dark']
+  const isDeenergized = darkStatuses.includes(a.status) || darkStatuses.includes(b.status)
+
   // Main line
   ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
-  ctx.strokeStyle = (isFault && showFaultMarker) ? COLORS.fault : st.c
-  ctx.lineWidth = st.w
+  if (isFault && showFaultMarker) {
+    ctx.strokeStyle = COLORS.fault
+  } else if (isDeenergized) {
+    ctx.strokeStyle = 'rgba(107, 114, 128, 0.35)' // De-energized wire: dark gray, no power!
+  } else {
+    ctx.strokeStyle = st.c // Live wire: vibrant color
+  }
+  ctx.lineWidth = (isDeenergized && !isFault) ? Math.max(1.2, st.w * 0.7) : st.w
   if (e.type === 'service_drop') ctx.setLineDash([5, 4])
   ctx.stroke()
   ctx.setLineDash([])
@@ -176,20 +185,20 @@ function drawEdgeLine(ctx, e, a, b, flow, time, isMultiSel, highlightColor, show
     ctx.restore()
   }
 
-  // Flow dots (live edges only)
-  const darkStatuses = ['dark', 'confirmed_dark']
-  if (!isFault && !darkStatuses.includes(a.status) && !darkStatuses.includes(b.status)) {
+  // Flow dots (live edges only: strictly both nodes must be 'live' and edge not faulted)
+  if (!isFault && !isDeenergized && a.status === 'live' && b.status === 'live') {
     const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy)
-    if (len < 20) return
-    const dots = Math.max(1, Math.floor(len / 55))
-    ctx.save(); ctx.globalAlpha = 0.55
-    for (let i = 0; i < dots; i++) {
-      const t = ((flow / len + i / dots) % 1 + 1) % 1
-      ctx.beginPath()
-      ctx.arc(a.x + dx * t, a.y + dy * t, 2.2, 0, Math.PI * 2)
-      ctx.fillStyle = '#fff'; ctx.fill()
+    if (len >= 20) {
+      const dots = Math.max(1, Math.floor(len / 55))
+      ctx.save(); ctx.globalAlpha = 0.55
+      for (let i = 0; i < dots; i++) {
+        const t = ((flow / len + i / dots) % 1 + 1) % 1
+        ctx.beginPath()
+        ctx.arc(a.x + dx * t, a.y + dy * t, 2.2, 0, Math.PI * 2)
+        ctx.fillStyle = '#fff'; ctx.fill()
+      }
+      ctx.restore()
     }
-    ctx.restore()
   }
 }
 
@@ -563,7 +572,7 @@ export default function NetworkCanvas({
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const animRef = useRef(null)
-  const importedRef = useRef(false)
+  const lastLoadedDataKeyRef = useRef('')
 
   const [mode, setMode] = useState('select')
   const [nodes, setNodes] = useState([])
@@ -587,6 +596,21 @@ export default function NetworkCanvas({
   const [highlightEdges, setHighlightEdges] = useState(new Set())
   const [showScenarioLab, setShowScenarioLab] = useState(false)
   const [activeStepData, setActiveStepData] = useState(null)
+
+  // Camera smooth focus on world coordinates
+  const focusOnCoordinates = useCallback((wx, wy, customScale = 1.25) => {
+    const c = canvasRef.current
+    if (!c) return
+    const dpr = window.devicePixelRatio || 1
+    const w = c.width / dpr, h = c.height / dpr
+    const sc = customScale || 1.25
+    const targetYPos = showScenarioLab ? h * 0.45 : h * 0.5
+    setTransform({
+      scale: sc,
+      x: (w / 2) - wx * sc,
+      y: targetYPos - wy * sc,
+    })
+  }, [showScenarioLab])
 
   // Master ref — read by animation loop & handlers without stale closures
   const S = useRef({})
@@ -614,65 +638,179 @@ export default function NetworkCanvas({
     return () => obs.disconnect()
   }, [])
 
-  /* ---- Generate random network on mount ---- */
+  /* ---- Load / Re-layout network whenever poles or dts change ---- */
   useEffect(() => {
+    // If no poles and no dts, generate initial fallback random network once
+    if (poles.length === 0 && dts.length === 0) {
+      if (lastLoadedDataKeyRef.current === '') {
+        const r = containerRef.current?.getBoundingClientRect()
+        if (!r || r.width === 0) return
+        const { nodes: nn, edges: ne } = genNetwork(r.width, r.height)
+        setNodes(nn); setEdges(ne); setBoundaries([]); setFaultIds(new Set()); setSelected(null); setSelectedSet(new Set())
+        setTransform({ x: 0, y: 0, scale: 1 })
+        setCounters({ pole: nn.filter(n => n.type === 'pole').length, dt: nn.filter(n => n.type === 'dt').length, home: nn.filter(n => n.type === 'home').length })
+        lastLoadedDataKeyRef.current = 'dummy'
+      }
+      return
+    }
+
+    const dataKey = `${poles.length}-${dts.length}-${poles[0]?.pole_id || ''}-${dts[0]?.dt_id || ''}`
+    const isNewTopology = lastLoadedDataKeyRef.current !== dataKey
+    lastLoadedDataKeyRef.current = dataKey
+
     const r = containerRef.current?.getBoundingClientRect()
-    if (!r || r.width === 0) return
-    const { nodes: nn, edges: ne } = genNetwork(r.width, r.height)
-    setNodes(nn); setEdges(ne); setBoundaries([]); setFaultIds(new Set()); setSelected(null); setSelectedSet(new Set())
-    setTransform({ x: 0, y: 0, scale: 1 })
-    setCounters({ pole: nn.filter(n => n.type === 'pole').length, dt: nn.filter(n => n.type === 'dt').length, home: nn.filter(n => n.type === 'home').length })
-    importedRef.current = true
-  }, [])
+    const W = r?.width || 1200, H = r?.height || 700
 
-  /* ---- Import backend data once ---- */
-  useEffect(() => {
-    if (importedRef.current || (poles.length === 0 && dts.length === 0)) return
-    const r = containerRef.current?.getBoundingClientRect()
-    if (!r || r.width === 0) return
-    importedRef.current = true
-
-    const W = r.width, H = r.height
-
-    // --- 1. Create nodes (positions will be assigned later) ---
-    const nn = []
-    dts.forEach(dt => nn.push({ id: `bdt-${dt.dt_id}`, type: 'dt', x: 0, y: 0, label: dt.dt_id, status: 'live', meta: dt }))
-    poles.forEach(p => nn.push({ id: `bp-${p.pole_id}`, type: 'pole', x: 0, y: 0, label: p.pole_id, status: p.status || 'live', meta: p, isFault: p.status === 'fault' }))
-
-    const nMap = {}
-    nn.forEach(n => { nMap[n.id] = n })
-
-    // --- 2. Build edges by matching from/to lat/lon to nearest nodes ---
-    // Use temporary GPS positions just for edge matching
-    const all = [...poles.map(p => ({ lat: p.lat, lon: p.lon })), ...dts.map(d => ({ lat: d.lat, lon: d.lon }))]
-    const lats = all.map(i => i.lat).filter(Boolean), lons = all.map(i => i.lon).filter(Boolean)
-    const [mnLa, mxLa] = [Math.min(...lats), Math.max(...lats)]
-    const [mnLo, mxLo] = [Math.min(...lons), Math.max(...lons)]
-    const laR = mxLa - mnLa || 0.001, loR = mxLo - mnLo || 0.001
-    const tX = lon => ((lon - mnLo) / loR) * 1000
-    const tY = lat => ((mxLa - lat) / laR) * 1000
-
-    // Assign temp GPS positions for edge matching
-    dts.forEach(dt => { const n = nMap[`bdt-${dt.dt_id}`]; if (n) { n._gx = tX(dt.lon); n._gy = tY(dt.lat) } })
-    poles.forEach(p => { const n = nMap[`bp-${p.pole_id}`]; if (n) { n._gx = tX(p.lon); n._gy = tY(p.lat) } })
-
-    const ne = []
-    initialEdges.forEach((e, i) => {
-      const fx = tX(e.from_lon), fy = tY(e.from_lat), tx = tX(e.to_lon), ty = tY(e.to_lat)
-      let fromN = null, toN = null, fd = Infinity, td = Infinity
-      nn.forEach(n => {
-        const gx = n._gx || 0, gy = n._gy || 0
-        const d1 = (gx - fx) ** 2 + (gy - fy) ** 2, d2 = (gx - tx) ** 2 + (gy - ty) ** 2
-        if (d1 < fd) { fd = d1; fromN = n }
-        if (d2 < td) { td = d2; toN = n }
+    if (!isNewTopology) {
+      // Just update pole statuses
+      const m = {}
+      poles.forEach(p => {
+        const isDark = p.status === 'confirmed_dark' || p.status === 'dark' || p.status === 'suspected_dark'
+        m[`bp-${p.pole_id}`] = {
+          status: p.status || 'live',
+          isFault: p.status === 'fault' || isDark,
+        }
       })
-      if (fromN && toN && fromN.id !== toN.id) {
-        ne.push({ id: `be-${i}`, from: fromN.id, to: toN.id, type: autoEdgeType(fromN, toN), status: e.status || 'live' })
+      setNodes(prev => prev.map(n => m[n.id] ? { ...n, status: m[n.id].status, isFault: m[n.id].isFault } : n))
+      return
+    }
+
+    // --- 1. Create nodes ---
+    const nn = []
+    const nMap = {}
+
+    // Substation (Root)
+    const ssId = '__ss__'
+    const ssNode = { id: ssId, type: 'substation', x: W / 2, y: 50, label: 'SS-01', status: 'live' }
+    nn.push(ssNode)
+    nMap[ssId] = ssNode
+
+    // Transformers (DTs)
+    dts.forEach(dt => {
+      const dtNode = {
+        id: `bdt-${dt.dt_id}`,
+        type: 'dt',
+        x: 0,
+        y: 0,
+        label: dt.name || dt.dt_id,
+        status: 'live',
+        meta: dt,
+      }
+      nn.push(dtNode)
+      nMap[dtNode.id] = dtNode
+      nMap[dt.dt_id] = dtNode
+    })
+
+    // Poles
+    poles.forEach(p => {
+      const isDark = p.status === 'confirmed_dark' || p.status === 'dark' || p.status === 'suspected_dark'
+      const poleNode = {
+        id: `bp-${p.pole_id}`,
+        type: 'pole',
+        x: 0,
+        y: 0,
+        label: p.pole_id,
+        status: p.status || 'live',
+        meta: p,
+        isFault: p.status === 'fault' || isDark,
+      }
+      nn.push(poleNode)
+      nMap[poleNode.id] = poleNode
+      nMap[p.pole_id] = poleNode
+    })
+
+    // --- 2. Build edges ---
+    const ne = []
+    const edgeKeySet = new Set()
+    const poleConnectedSet = new Set()
+
+    // Match initialEdges by IDs or coordinate fallback
+    if (initialEdges && initialEdges.length > 0) {
+      initialEdges.forEach((e, i) => {
+        const fromRaw = e.from_id || e.from
+        const toRaw = e.to_id || e.to
+        const fromN = nMap[fromRaw] || nMap[`bp-${fromRaw}`] || nMap[`bdt-${fromRaw}`]
+        const toN = nMap[toRaw] || nMap[`bp-${toRaw}`] || nMap[`bdt-${toRaw}`]
+        if (fromN && toN && fromN.id !== toN.id) {
+          const k = `${fromN.id}->${toN.id}`
+          if (!edgeKeySet.has(k)) {
+            edgeKeySet.add(k)
+            poleConnectedSet.add(toN.id)
+            ne.push({
+              id: `be-${i}`,
+              from: fromN.id,
+              to: toN.id,
+              type: autoEdgeType(fromN, toN),
+              status: e.status || 'live',
+            })
+          }
+        }
+      })
+    }
+
+    // Connect Substation to DTs with feeder edges
+    dts.forEach(dt => {
+      const dtNode = nMap[`bdt-${dt.dt_id}`]
+      if (dtNode) {
+        const k = `${ssId}->${dtNode.id}`
+        if (!edgeKeySet.has(k)) {
+          edgeKeySet.add(k)
+          ne.push({
+            id: `be-ss-${dt.dt_id}`,
+            from: ssId,
+            to: dtNode.id,
+            type: 'feeder',
+            status: 'live',
+          })
+        }
       }
     })
 
-    // --- 3. Hierarchical tree layout ---
-    // Build adjacency list
+    // If poles are not yet connected via initialEdges, connect them systematically
+    const dtPolesMap = {}
+    poles.forEach(p => {
+      const dtId = p.dt_id || 'default'
+      if (!dtPolesMap[dtId]) dtPolesMap[dtId] = []
+      dtPolesMap[dtId].push(p)
+    })
+
+    Object.keys(dtPolesMap).forEach(dtId => {
+      const dtNode = nMap[`bdt-${dtId}`] || nMap[dtId]
+      const groupPoles = dtPolesMap[dtId].sort((a, b) => (a.seq_on_line || 0) - (b.seq_on_line || 0))
+
+      let prevNode = dtNode || ssNode
+      groupPoles.forEach((p) => {
+        const pNode = nMap[`bp-${p.pole_id}`]
+        if (!pNode) return
+
+        if (!poleConnectedSet.has(pNode.id)) {
+          let parentNode = null
+          if (p.parent_pole_id) {
+            parentNode = nMap[`bp-${p.parent_pole_id}`] || nMap[p.parent_pole_id] || nMap[`bdt-${p.parent_pole_id}`]
+          }
+          if (!parentNode) {
+            parentNode = prevNode
+          }
+          if (parentNode && parentNode.id !== pNode.id) {
+            const k = `${parentNode.id}->${pNode.id}`
+            if (!edgeKeySet.has(k)) {
+              edgeKeySet.add(k)
+              ne.push({
+                id: `be-auto-${p.pole_id}`,
+                from: parentNode.id,
+                to: pNode.id,
+                type: parentNode.type === 'dt' ? 'lt_line' : 'span',
+                status: 'live',
+              })
+              poleConnectedSet.add(pNode.id)
+            }
+          }
+        }
+        prevNode = pNode
+      })
+    })
+
+    // --- 3. Hierarchical Tree Layout ---
     const adj = {}
     nn.forEach(n => { adj[n.id] = [] })
     ne.forEach(e => {
@@ -680,48 +818,18 @@ export default function NetworkCanvas({
       if (adj[e.to]) adj[e.to].push(e.from)
     })
 
-    // Group DTs by feeder (use meta.feeder_id if available)
-    const feederGroups = {}
-    nn.filter(n => n.type === 'dt').forEach(dt => {
-      const fid = dt.meta?.feeder_id || 'default'
-      if (!feederGroups[fid]) feederGroups[fid] = []
-      feederGroups[fid].push(dt.id)
-    })
-    const feederIds = Object.keys(feederGroups)
-
-    // Create a virtual substation
-    const ssId = '__ss__'
-    const ssNode = { id: ssId, type: 'substation', x: W / 2, y: 50, label: 'SS-01', status: 'live' }
-    nn.push(ssNode)
-    nMap[ssId] = ssNode
-    adj[ssId] = []
-
-    // Connect substation to all DTs with feeder edges
-    feederIds.forEach(fid => {
-      feederGroups[fid].forEach(dtId => {
-        ne.push({ id: `be-ss-${dtId}`, from: ssId, to: dtId, type: 'feeder', status: 'live' })
-        if (!adj[ssId]) adj[ssId] = []
-        adj[ssId].push(dtId)
-        if (adj[dtId]) adj[dtId].push(ssId)
-      })
-    })
-
     // BFS from substation to assign tree depth and children
-    const visited = new Set()
-    const parent = {}
+    const visited = new Set([ssId])
     const childrenMap = {}
-    const depthMap = {}
-    const queue = [ssId]
-    visited.add(ssId)
-    depthMap[ssId] = 0
+    const depthMap = { [ssId]: 0 }
     childrenMap[ssId] = []
+    const queue = [ssId]
 
     while (queue.length) {
       const cur = queue.shift()
       for (const nb of (adj[cur] || [])) {
         if (!visited.has(nb)) {
           visited.add(nb)
-          parent[nb] = cur
           depthMap[nb] = (depthMap[cur] || 0) + 1
           childrenMap[nb] = []
           if (!childrenMap[cur]) childrenMap[cur] = []
@@ -731,26 +839,20 @@ export default function NetworkCanvas({
       }
     }
 
-    // Handle disconnected nodes — attach to nearest DT
+    // Attach any orphans to nearest DT
     nn.forEach(n => {
       if (!visited.has(n.id) && n.id !== ssId) {
         visited.add(n.id)
-        // Find nearest DT already in tree
-        let nearDt = null, nearDist = Infinity
-        nn.filter(nd => nd.type === 'dt' && depthMap[nd.id] !== undefined).forEach(dt => {
-          const d = ((n._gx || 0) - (dt._gx || 0)) ** 2 + ((n._gy || 0) - (dt._gy || 0)) ** 2
-          if (d < nearDist) { nearDist = d; nearDt = dt }
-        })
-        const attachTo = nearDt ? nearDt.id : ssId
+        const dtCandidates = nn.filter(d => d.type === 'dt' && depthMap[d.id] !== undefined)
+        const attachTo = dtCandidates[0]?.id || ssId
         depthMap[n.id] = (depthMap[attachTo] || 0) + 1
         childrenMap[n.id] = []
         if (!childrenMap[attachTo]) childrenMap[attachTo] = []
         childrenMap[attachTo].push(n.id)
-        parent[n.id] = attachTo
       }
     })
 
-    // Compute subtree widths for spacing
+    // Compute subtree widths
     const subtreeWidth = {}
     const computeWidth = (id) => {
       const kids = childrenMap[id] || []
@@ -763,8 +865,8 @@ export default function NetworkCanvas({
     computeWidth(ssId)
 
     // Position nodes using recursive layout
-    const LAYER_H = 70
-    const LEAF_SPACING = 42
+    const LAYER_H = 75
+    const LEAF_SPACING = 38
     const totalLeaves = subtreeWidth[ssId] || 1
     const totalWidth = Math.max(W - 80, totalLeaves * LEAF_SPACING)
 
@@ -774,13 +876,11 @@ export default function NetworkCanvas({
       const kids = childrenMap[id] || []
       const myW = subtreeWidth[id] || 1
 
-      // Center this node in its allocated width
       node.x = leftX + availW / 2
       node.y = 50 + depth * LAYER_H
 
       if (kids.length === 0) return
 
-      // Distribute children proportionally
       let cursor = leftX
       kids.forEach(kid => {
         const kidW = subtreeWidth[kid] || 1
@@ -793,25 +893,155 @@ export default function NetworkCanvas({
     const startX = (W - totalWidth) / 2
     positionTree(ssId, startX, totalWidth, 0)
 
-    // Clean up temp GPS fields
-    nn.forEach(n => { delete n._gx; delete n._gy })
+    setNodes(nn)
+    setEdges(ne)
+    setCounters({
+      pole: nn.filter(n => n.type === 'pole').length,
+      dt: nn.filter(n => n.type === 'dt').length,
+      home: 0,
+    })
 
-    setNodes(nn); setEdges(ne)
-    setCounters({ pole: nn.filter(n => n.type === 'pole').length, dt: nn.filter(n => n.type === 'dt').length, home: 0 })
+    // Auto-detect initial boundaries
+    const initialBounds = solveFault(nn, ne)
+    setBoundaries(initialBounds)
     const fIds = new Set()
     ne.forEach(e => { if (e.status === 'fault') fIds.add(e.id) })
     nn.forEach(n => { if (n.isFault) fIds.add(n.id) })
     setFaultIds(fIds)
+
+    // Auto-fit initial view
+    setTransform({ x: 0, y: 0, scale: Math.min(1, (W - 80) / totalWidth) })
   }, [poles, dts, initialEdges])
 
-  /* ---- Sync pole statuses from backend ---- */
+  /* ---- Sync pole statuses from backend / simulator ---- */
   useEffect(() => {
     if (!poles.length) return
     if (showScenarioLab) return // Preserve active simulated scenario states during Try-On Lab mode
     const m = {}
-    poles.forEach(p => { m[`bp-${p.pole_id}`] = { status: p.status || 'live', isFault: p.status === 'fault' } })
+    poles.forEach(p => {
+      const isDark = p.status === 'confirmed_dark' || p.status === 'dark' || p.status === 'suspected_dark'
+      m[`bp-${p.pole_id}`] = {
+        status: p.status || 'live',
+        isFault: p.status === 'fault' || isDark,
+      }
+    })
     setNodes(prev => prev.map(n => m[n.id] !== undefined ? { ...n, status: m[n.id].status, isFault: m[n.id].isFault } : n))
   }, [poles, showScenarioLab])
+
+  /* ---- Interactive Fault Localization on Ticket Selection ---- */
+  useEffect(() => {
+    if (!selectedTicket || nodes.length === 0) return
+
+    const affectedSet = new Set(selectedTicket.affected_poles || [])
+    const dtId = selectedTicket.dt_id
+    const livePoleId = selectedTicket.boundary_live_pole
+    const darkPoleId = selectedTicket.boundary_dark_pole
+
+    const hlNodes = new Set()
+    const hlEdges = new Set()
+    let focusTarget = null
+
+    // 1. Mark affected poles as dark and fault in nodes
+    const updatedNodes = nodes.map(n => {
+      const cleanId = n.id.startsWith('bp-') ? n.id.slice(3) : n.id.startsWith('bdt-') ? n.id.slice(4) : n.id
+      const isAffected = affectedSet.has(cleanId)
+      const isLiveBound = livePoleId && (cleanId === livePoleId || n.label === livePoleId)
+      const isDarkBound = darkPoleId && (cleanId === darkPoleId || n.label === darkPoleId)
+      const isFaultDT = selectedTicket.fault_type === 'dt' && (cleanId === dtId || n.label === dtId || n.meta?.dt_id === dtId)
+
+      if (isAffected || isDarkBound || isFaultDT) {
+        hlNodes.add(n.id)
+        if (!focusTarget || isDarkBound) focusTarget = n
+        return {
+          ...n,
+          status: 'confirmed_dark',
+          isFault: true,
+        }
+      }
+      if (isLiveBound) {
+        hlNodes.add(n.id)
+        if (!focusTarget) focusTarget = n
+        return {
+          ...n,
+          status: 'live',
+        }
+      }
+      return n
+    })
+
+    // 2. Mark boundary edge as fault
+    let boundaryEdge = null
+    const updatedEdges = edges.map(e => {
+      const fromClean = e.from.startsWith('bp-') ? e.from.slice(3) : e.from.startsWith('bdt-') ? e.from.slice(4) : e.from
+      const toClean = e.to.startsWith('bp-') ? e.to.slice(3) : e.to.startsWith('bdt-') ? e.to.slice(4) : e.to
+
+      const isSpanFault = (
+        livePoleId && darkPoleId &&
+        ((fromClean === livePoleId && toClean === darkPoleId) || (fromClean === darkPoleId && toClean === livePoleId))
+      )
+      const isDTFault = (
+        selectedTicket.fault_type === 'dt' &&
+        (fromClean === dtId || toClean === dtId)
+      )
+
+      if (isSpanFault || isDTFault) {
+        hlEdges.add(e.id)
+        boundaryEdge = e
+        return { ...e, status: 'fault' }
+      }
+      return e
+    })
+
+    // Strictly rederive electrical power reachability from Substation
+    // Any node downstream of the faulted edge or faulted DT loses power and turns confirmed_dark!
+    const rederivedNodes = rederiveStatuses(updatedNodes, updatedEdges)
+
+    setNodes(rederivedNodes)
+    setEdges(updatedEdges)
+    setHighlightNodes(hlNodes)
+    setHighlightEdges(hlEdges)
+
+    // 3. Set explicit boundaries so the laser beam and Upstream/Downstream banners draw
+    const newBounds = []
+    if (livePoleId && darkPoleId) {
+      const liveNode = updatedNodes.find(n => n.id === `bp-${livePoleId}` || n.label === livePoleId)
+      const darkNode = updatedNodes.find(n => n.id === `bp-${darkPoleId}` || n.label === darkPoleId)
+      if (liveNode && darkNode) {
+        newBounds.push({
+          live: liveNode.id,
+          dark: darkNode.id,
+          edge: boundaryEdge?.id || '',
+          isNodeFault: false,
+          isEdgeFault: true,
+        })
+      }
+    } else if (selectedTicket.fault_type === 'dt' && dtId) {
+      const dtNode = updatedNodes.find(n => n.id === `bdt-${dtId}` || n.label === dtId)
+      if (dtNode) {
+        newBounds.push({
+          live: '__ss__',
+          dark: dtNode.id,
+          edge: `be-ss-${dtId}`,
+          isNodeFault: true,
+          isEdgeFault: false,
+        })
+      }
+    }
+    if (newBounds.length > 0) {
+      setBoundaries(newBounds)
+    }
+
+    // 4. Smooth camera focus onto fault
+    if (boundaryEdge) {
+      const a = updatedNodes.find(n => n.id === boundaryEdge.from)
+      const b = updatedNodes.find(n => n.id === boundaryEdge.to)
+      if (a && b) {
+        focusOnCoordinates((a.x + b.x) / 2, (a.y + b.y) / 2, 1.35)
+      }
+    } else if (focusTarget) {
+      focusOnCoordinates(focusTarget.x, focusTarget.y, 1.35)
+    }
+  }, [selectedTicket, focusOnCoordinates])
 
   /* ---- Animation loop ---- */
   useEffect(() => {
@@ -1353,20 +1583,6 @@ export default function NetworkCanvas({
     setTransform({ scale: ns, x: mx - (mx - s.x) * ratio, y: my - (my - s.y) * ratio })
   }, [])
 
-  const focusOnCoordinates = useCallback((wx, wy, customScale = 1.15) => {
-    const c = canvasRef.current
-    if (!c) return
-    const dpr = window.devicePixelRatio || 1
-    const w = c.width / dpr, h = c.height / dpr
-    const sc = customScale || 1.15
-    const targetYPos = showScenarioLab ? h * 0.45 : h * 0.5
-    setTransform({
-      scale: sc,
-      x: (w / 2) - wx * sc,
-      y: targetYPos - wy * sc,
-    })
-  }, [showScenarioLab])
-
   /* ---- Action handlers ---- */
   const handleRandom = () => {
     // Generate purely local fake random layout (will be overwritten by backend next tick)
@@ -1629,6 +1845,10 @@ export default function NetworkCanvas({
       if (e1) {
         const a = newNodes.find(n => n.id === e1.from)
         if (a) focusOnCoordinates(a.x, a.y, 1.1)
+        if (onInjectFault) {
+          const dtId = a?.meta?.dt_id || 'DT-001'
+          onInjectFault('span', e1.from, dtId)
+        }
       }
     } else if (scenarioId === 'dead_sensor_false_alarm') {
       const leafPoles = baseNodes.filter(n => n.type === 'pole' && (childrenMap[n.id] || []).length === 0)
@@ -1640,6 +1860,9 @@ export default function NetworkCanvas({
         setFaultIds(new Set())
         setBoundaries([])
         focusOnCoordinates(leaf.x, leaf.y, 1.35)
+        if (onInjectFault) {
+          onInjectFault('anomaly', leaf.id, leaf.meta?.dt_id || 'DT-001')
+        }
       }
     } else if (scenarioId === 'feeder_trip') {
       const feederEdges = baseEdges.filter(e => e.type === 'feeder')
@@ -1655,6 +1878,9 @@ export default function NetworkCanvas({
         const a = newNodes.find(n => n.id === fEdge.from)
         const b = newNodes.find(n => n.id === fEdge.to)
         if (a && b) focusOnCoordinates((a.x + b.x) / 2, (a.y + b.y) / 2, 1.15)
+        if (onInjectFault) {
+          onInjectFault('feeder', fEdge.to || 'bdt-DT-001', 'F-01-01')
+        }
       }
     }
   }
@@ -1710,7 +1936,7 @@ export default function NetworkCanvas({
     setNodes([]); setEdges([]); setBoundaries([])
     setFaultIds(new Set()); setSelected(null); setSelectedSet(new Set())
     setCounters({ pole: 0, dt: 0, home: 0 })
-    importedRef.current = false
+    lastLoadedDataKeyRef.current = ''
   }
 
   const cursor = MODES.find(m => m.id === mode)?.cursor || 'default'
@@ -1843,6 +2069,64 @@ export default function NetworkCanvas({
             🔧 Repair This Fault
           </button>
           <div className="info-hint">Or Shift+click to multi-select faults</div>
+        </div>
+      )}
+
+      {/* Selected Ticket / Active Fault Focus Banner */}
+      {selectedTicket && (
+        <div className="canvas-fault-focus-banner">
+          <div className="fault-focus-header">
+            <span className="fault-focus-badge">⚡ ACTIVE FAULT</span>
+            <span className="fault-focus-id">{selectedTicket.display_id}</span>
+            <span className={`status-pill ${selectedTicket.status}`}>{selectedTicket.status}</span>
+          </div>
+          <div className="fault-focus-body">
+            <div className="fault-focus-line">
+              <strong>Type:</strong> <span style={{ textTransform: 'uppercase', color: '#f59e0b' }}>{selectedTicket.fault_type}</span> fault
+              {selectedTicket.dt_id && <span> · <strong>DT:</strong> {selectedTicket.dt_id}</span>}
+              {selectedTicket.feeder_id && <span> · <strong>Feeder:</strong> {selectedTicket.feeder_id}</span>}
+            </div>
+            {selectedTicket.boundary_live_pole && selectedTicket.boundary_dark_pole && (
+              <div className="fault-focus-span">
+                <span className="pole-live-tag">🟢 {selectedTicket.boundary_live_pole} (Live)</span>
+                <span className="span-arrow">➔ ⚡ ➔</span>
+                <span className="pole-dark-tag">🔴 {selectedTicket.boundary_dark_pole} (Dark)</span>
+              </div>
+            )}
+            <div className="fault-focus-meta">
+              <span>{selectedTicket.affected_pole_count || selectedTicket.affected_poles?.length || 0} poles dark</span>
+              <span>Priority: {selectedTicket.priority_score || 200}</span>
+            </div>
+          </div>
+          <div className="fault-focus-actions">
+            <button
+              className="btn btn-xs btn-primary"
+              onClick={() => {
+                if (boundaries.length > 0) {
+                  const b = boundaries[0]
+                  const a = nodes.find(n => n.id === b.live)
+                  const c = nodes.find(n => n.id === b.dark)
+                  if (a && c) focusOnCoordinates((a.x + c.x) / 2, (a.y + c.y) / 2, 1.35)
+                } else if (selectedTicket.boundary_live_pole) {
+                  const n = nodes.find(nd => nd.label === selectedTicket.boundary_live_pole || nd.id === `bp-${selectedTicket.boundary_live_pole}`)
+                  if (n) focusOnCoordinates(n.x, n.y, 1.35)
+                } else if (selectedTicket.fault_type === 'dt' && selectedTicket.dt_id) {
+                  const dtNode = nodes.find(nd => nd.label === selectedTicket.dt_id || nd.id === `bdt-${selectedTicket.dt_id}`)
+                  if (dtNode) focusOnCoordinates(dtNode.x, dtNode.y, 1.35)
+                }
+              }}
+            >
+              🎯 Recenter Fault
+            </button>
+            <button
+              className="btn btn-xs btn-secondary"
+              onClick={() => {
+                setShowScenarioLab(true)
+              }}
+            >
+              🧪 Inspect Algorithm
+            </button>
+          </div>
         </div>
       )}
 

@@ -24,6 +24,10 @@ from app.core.topology import build_network_graph, PoleInfo, DTInfo
 from app.core.localization import LocalizationEngine
 from app.core.ticket_manager import TicketManager
 from app.core.simulator import FaultSimulator
+from app.core.notifications import (
+    NotificationHub, GridEvent, SSEBroadcastObserver,
+    AuditLogObserver, CrewAlertObserver, MetricsObserver
+)
 from app.api import (
     telemetry, tickets, simulator, events, ai, analytics,
     data_loader, outages, auth, audit, crews, health
@@ -262,24 +266,25 @@ async def detection_sweep_loop(engine: LocalizationEngine, ticket_manager: Ticke
                         # Check if this boundary already has a ticket
                         if await ticket_manager.is_duplicate_boundary(boundary):
                             continue
-                        ticket_data = await ticket_manager.create_ticket_from_boundary(boundary, db)
-                        if ticket_data:
-                            await broadcast_event("ticket_created", ticket_data)
+                        # create_ticket_from_boundary notifies all observers via publisher
+                        await ticket_manager.create_ticket_from_boundary(boundary, db)
 
             if anomalies:
                 for anomaly in anomalies:
                     logger.info(f"Device anomaly: {anomaly.pole_id} ({anomaly.reason})")
-                    await broadcast_event("device_anomaly", {
-                        "pole_id": anomaly.pole_id,
-                        "dt_id": anomaly.dt_id,
-                        "reason": anomaly.reason,
-                    })
+                    await ticket_manager.publisher.publish(GridEvent(
+                        event_type="device_anomaly",
+                        data={
+                            "pole_id": anomaly.pole_id,
+                            "dt_id": anomaly.dt_id,
+                            "reason": anomaly.reason,
+                        },
+                        priority="MEDIUM",
+                    ))
 
-            # Check for restoration / auto-verification
+            # Check for restoration / auto-verification (notifies observers via publisher)
             async with async_session() as db:
-                verified = await ticket_manager.check_restoration(db)
-                for display_id in verified:
-                    await broadcast_event("ticket_verified", {"display_id": display_id})
+                await ticket_manager.check_restoration(db)
 
         except asyncio.CancelledError:
             logger.info("Detection sweep loop cancelled")
@@ -303,18 +308,25 @@ async def lifespan(app: FastAPI):
     await seed_database()
     await seed_users_and_crews()
 
+    # Initialize notification hub (Observer Design Pattern)
+    hub = NotificationHub()
+    hub.subscribe(SSEBroadcastObserver(broadcast_event))
+    hub.subscribe(AuditLogObserver(session_factory=async_session))
+    hub.subscribe(CrewAlertObserver(min_priority="HIGH"))
+    metrics_obs = MetricsObserver()
+    hub.subscribe(metrics_obs)
+
     # Initialize localization engine
     loc_engine = await initialize_engine()
-    ticket_mgr = TicketManager(loc_engine)
+    ticket_mgr = TicketManager(loc_engine, publisher=hub)
     sim = FaultSimulator(loc_engine)
-
-    # Wire up SSE broadcasting
-    ticket_mgr.on_ticket_event = broadcast_event
 
     # Store in global state
     app_state["engine"] = loc_engine
     app_state["ticket_manager"] = ticket_mgr
     app_state["simulator"] = sim
+    app_state["notification_hub"] = hub
+    app_state["metrics_observer"] = metrics_obs
 
     # Start detection sweep background task
     sweep_task = asyncio.create_task(detection_sweep_loop(loc_engine, ticket_mgr))
